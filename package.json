@@ -1,0 +1,15 @@
+{
+  "name": "cafe24-ai-connector",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Dedicated Cafe24 OAuth and read-only Admin API connector for AI/reporting workflows.",
+  "type": "module",
+  "engines": {
+    "node": ">=20.10"
+  },
+  "scripts": {
+    "check": "node --check src/server.mjs && node --check src/cafe24.mjs && node --check src/config.mjs && node --check src/crypto.mjs && node --check src/token-store.mjs",
+    "start": "node src/server.mjs",
+    "test": "node --test"
+  }
+}

@@ -1,0 +1,12 @@
+services:
+  cafe24-ai-connector:
+    build: .
+    env_file:
+      - .env
+    environment:
+      HOST: 0.0.0.0
+    ports:
+      - "4173:4173"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped

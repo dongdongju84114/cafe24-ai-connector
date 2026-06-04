@@ -1,0 +1,38 @@
+services:
+  - type: web
+    name: cafe24-ai-connector
+    runtime: node
+    region: singapore
+    plan: starter
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /healthz
+    disk:
+      name: cafe24-token-store
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_VERSION
+        value: 22
+      - key: HOST
+        value: 0.0.0.0
+      - key: CAFE24_TOKEN_STORE_PATH
+        value: /var/data/tokens.enc.json
+      - key: CAFE24_API_VERSION
+        value: 2026-03-01
+      - key: CAFE24_SCOPES
+        value: mall.read_application mall.write_application mall.read_order mall.read_product mall.read_category mall.read_store mall.read_salesreport mall.read_analytics
+      - key: CAFE24_ALLOWED_ADMIN_PATH_PREFIXES
+        value: /api/v2/admin/orders,/api/v2/admin/products,/api/v2/admin/categories,/api/v2/admin/financials,/api/v2/admin/reports
+      - key: CAFE24_CLIENT_ID
+        sync: false
+      - key: CAFE24_CLIENT_SECRET
+        sync: false
+      - key: CAFE24_DEFAULT_MALL_ID
+        sync: false
+      - key: INTERNAL_API_KEY
+        generateValue: true
+      - key: CAFE24_TOKEN_ENCRYPTION_KEY
+        generateValue: true
+      - key: CAFE24_OAUTH_STATE_SECRET
+        generateValue: true

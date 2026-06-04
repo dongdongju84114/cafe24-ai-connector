@@ -1,0 +1,11 @@
+services:
+  cafe24-ai-connector:
+    environment:
+      HOST: 0.0.0.0
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      - cafe24-ai-connector
+    restart: unless-stopped
