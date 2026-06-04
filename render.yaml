@@ -10,7 +10,7 @@ services:
     disk:
       name: cafe24-token-store
       mountPath: /var/data
-      sizeGB: 1
+      sizeGB: 5
     envVars:
       - key: NODE_VERSION
         value: 22
