@@ -89,11 +89,7 @@ Render에서 생성합니다.
 1. Render Dashboard에서 **New > Blueprint**를 선택합니다.
 2. 방금 만든 GitHub repo를 연결합니다.
 3. `render.yaml`을 감지하면 `cafe24-ai-connector` web service를 생성합니다.
-4. `sync: false`로 표시된 값들을 입력합니다.
-   - `CAFE24_CLIENT_ID`
-   - `CAFE24_CLIENT_SECRET`
-   - `CAFE24_DEFAULT_MALL_ID`
-5. 배포가 끝나면 Render URL을 확인합니다.
+4. 배포가 끝나면 Render URL을 확인합니다.
 
 예를 들어 Render URL이 아래와 같다면:
 
@@ -113,9 +109,17 @@ https://cafe24-ai-connector.onrender.com/cafe24/oauth/callback
 
 Render는 web service에 `RENDER_EXTERNAL_URL`을 자동으로 넣어주므로, `PUBLIC_BASE_URL`을 따로 설정하지 않아도 이 URL을 기준으로 App URL/Redirect URI를 화면에 표시합니다. 나중에 custom domain을 붙이면 `PUBLIC_BASE_URL=https://your-domain`으로 직접 지정하세요.
 
-`render.yaml`은 persistent disk를 `/var/data`에 붙이고 `CAFE24_TOKEN_STORE_PATH=/var/data/tokens.enc.json`로 설정합니다. Render의 일반 filesystem은 redeploy/restart 때 사라질 수 있으므로 Cafe24 refresh token 저장에는 disk가 필요합니다.
+기본 `render.yaml`은 빠른 확인을 위해 Render free web service로 배포합니다. 이 상태에서도 서버와 `/healthz`, `/cafe24/app`은 정상 동작하지만, Render의 일반 filesystem은 redeploy/restart 때 사라질 수 있으므로 Cafe24 refresh token 저장에는 적합하지 않습니다.
 
-주의: Render persistent disk는 유료 web service에서 사용할 수 있습니다. 무료 플랜으로 띄우면 토큰 저장 파일이 재배포 때 사라질 수 있어 OAuth를 다시 연결해야 합니다.
+실제 Cafe24 OAuth 연결 전에 Render 환경변수에 아래 값을 추가하세요.
+
+```text
+CAFE24_CLIENT_ID
+CAFE24_CLIENT_SECRET
+CAFE24_DEFAULT_MALL_ID
+```
+
+운영 사용 전에는 token store를 Render Disk, Render Postgres, 또는 별도 secret storage로 옮기세요. Render Disk를 쓸 경우 paid instance가 필요할 수 있습니다.
 
 ### 옵션 B. Cloudflare Tunnel
 
