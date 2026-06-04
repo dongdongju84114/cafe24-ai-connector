@@ -153,7 +153,7 @@ cp .env.example .env
 docker compose up --build
 ```
 
-운영에서는 `data/` 볼륨을 반드시 보존하세요. refresh token은 재발급 때 회전되므로, 토큰 저장 파일이 사라지면 다시 OAuth 연결을 해야 합니다.
+파일 저장소를 운영에서 쓴다면 `data/` 볼륨을 반드시 보존하세요. Render 무료 환경에서는 Supabase token store를 권장합니다. refresh token은 재발급 때 회전되므로, token store가 사라지면 다시 OAuth 연결을 해야 합니다.
 
 ## 환경변수
 
@@ -175,7 +175,36 @@ docker compose up --build
 | `INTERNAL_EXPOSE_CAFE24_ERROR_BODY` | Cafe24 오류 본문 노출 여부. 운영 기본값은 `false` |
 | `CAFE24_TOKEN_ENCRYPTION_KEY` | token store 암호화 키 |
 | `CAFE24_OAUTH_STATE_SECRET` | OAuth state 서명 키 |
+| `CAFE24_TOKEN_STORE_PROVIDER` | `file` 또는 `supabase`. Render 운영에서는 `supabase` 권장 |
 | `CAFE24_ALLOWED_ADMIN_PATH_PREFIXES` | generic proxy에서 허용할 Admin API path prefix |
+| `SUPABASE_URL` | Supabase Project URL |
+| `SUPABASE_SECRET_KEY` | Supabase backend secret key. 없으면 `SUPABASE_SERVICE_ROLE_KEY` 사용 |
+| `SUPABASE_SERVICE_ROLE_KEY` | Supabase legacy service role key |
+| `SUPABASE_TOKEN_TABLE` | Cafe24 token 저장 table. 기본값 `cafe24_tokens` |
+
+## Supabase token store
+
+Render 무료 인스턴스의 로컬 파일 저장소는 재배포/재시작 때 사라질 수 있습니다. 운영 테스트 단계부터는 Supabase Postgres에 암호화된 token payload를 저장하는 방식을 권장합니다.
+
+1. Supabase에서 무료 프로젝트를 생성합니다.
+2. SQL Editor에서 아래 파일 내용을 실행합니다.
+
+```text
+supabase/cafe24_tokens.sql
+```
+
+3. Render Environment에 아래 값을 추가합니다.
+
+```text
+CAFE24_TOKEN_STORE_PROVIDER=supabase
+SUPABASE_URL={Supabase Project URL}
+SUPABASE_SECRET_KEY={Supabase Secret Key 또는 Service Role Key}
+SUPABASE_TOKEN_TABLE=cafe24_tokens
+```
+
+`SUPABASE_SECRET_KEY` 또는 `SUPABASE_SERVICE_ROLE_KEY`는 서버 전용 키입니다. 브라우저, AI 프롬프트, 클라이언트 번들에 넣지 마세요.
+
+Supabase table에는 Cafe24 token 원문을 저장하지 않습니다. 서버가 `CAFE24_TOKEN_ENCRYPTION_KEY`로 token payload를 AES-GCM 암호화한 envelope만 저장합니다.
 
 ## URL 역할
 

@@ -12,10 +12,10 @@ import {
   isOriginAllowed,
   setCorsHeaders
 } from './security.mjs';
-import { TokenStore } from './token-store.mjs';
+import { createTokenStore } from './token-store.mjs';
 
 const config = getRuntimeConfig();
-const tokenStore = new TokenStore(config.tokenStorePath, config.encryptionKey || 'missing-dev-key');
+const tokenStore = createTokenStore(config);
 const internalRateLimiter = createRateLimiter({
   maxRequests: config.internal.rateLimitMax,
   windowMs: config.internal.rateLimitWindowMs
@@ -142,8 +142,16 @@ function getMallId(url) {
   return url.searchParams.get('mall_id') || config.cafe24.defaultMallId;
 }
 
+function canReadTokenStore() {
+  return config.encryptionKey &&
+    (
+      config.tokenStoreProvider !== 'supabase' ||
+      (config.supabase.url && config.supabase.key)
+    );
+}
+
 async function handleApp(_request, response) {
-  const summaries = config.encryptionKey ? await tokenStore.listSummaries() : [];
+  const summaries = canReadTokenStore() ? await tokenStore.listSummaries() : [];
   sendHtml(
     response,
     200,

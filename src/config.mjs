@@ -49,6 +49,9 @@ function parsePositiveInt(value, defaultValue) {
 
 export function createConfig(env = process.env) {
   const publicBaseUrl = (env.PUBLIC_BASE_URL || env.RENDER_EXTERNAL_URL || '').replace(/\/+$/, '');
+  const supabaseKey = env.SUPABASE_SECRET_KEY || env.SUPABASE_SERVICE_ROLE_KEY || '';
+  const tokenStoreProvider =
+    env.CAFE24_TOKEN_STORE_PROVIDER || (env.SUPABASE_URL && supabaseKey ? 'supabase' : 'file');
   const tokenStorePath = env.CAFE24_TOKEN_STORE_PATH || './data/tokens.enc.json';
   const encryptionKey = env.CAFE24_TOKEN_ENCRYPTION_KEY || '';
 
@@ -80,6 +83,12 @@ export function createConfig(env = process.env) {
       rateLimitWindowMs: parsePositiveInt(env.INTERNAL_RATE_LIMIT_WINDOW_MS, 60 * 1000),
       exposeCafe24ErrorBody: env.INTERNAL_EXPOSE_CAFE24_ERROR_BODY === 'true'
     },
+    tokenStoreProvider,
+    supabase: {
+      url: (env.SUPABASE_URL || '').replace(/\/+$/, ''),
+      key: supabaseKey,
+      table: env.SUPABASE_TOKEN_TABLE || 'cafe24_tokens'
+    },
     encryptionKey,
     oauthStateSecret: env.CAFE24_OAUTH_STATE_SECRET || encryptionKey,
     tokenStorePath: path.resolve(tokenStorePath)
@@ -95,6 +104,10 @@ export function getMissingSetup(config) {
   if (!config.encryptionKey) missing.push('CAFE24_TOKEN_ENCRYPTION_KEY');
   if (!config.oauthStateSecret) missing.push('CAFE24_OAUTH_STATE_SECRET');
   if (!config.internal.apiKey) missing.push('INTERNAL_API_KEY');
+  if (config.tokenStoreProvider === 'supabase') {
+    if (!config.supabase.url) missing.push('SUPABASE_URL');
+    if (!config.supabase.key) missing.push('SUPABASE_SECRET_KEY');
+  }
 
   return missing;
 }

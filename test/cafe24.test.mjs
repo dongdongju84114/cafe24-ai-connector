@@ -58,6 +58,19 @@ test('createConfig reads internal security settings', () => {
   assert.equal(config.internal.exposeCafe24ErrorBody, true);
 });
 
+test('createConfig uses Supabase token store when configured', () => {
+  const config = createConfig({
+    SUPABASE_URL: 'https://project.supabase.co',
+    SUPABASE_SECRET_KEY: 'secret-key',
+    SUPABASE_TOKEN_TABLE: 'custom_tokens'
+  });
+
+  assert.equal(config.tokenStoreProvider, 'supabase');
+  assert.equal(config.supabase.url, 'https://project.supabase.co');
+  assert.equal(config.supabase.key, 'secret-key');
+  assert.equal(config.supabase.table, 'custom_tokens');
+});
+
 test('callCafe24AdminGet blocks paths outside the allowlist before fetch', async () => {
   await assert.rejects(
     () =>

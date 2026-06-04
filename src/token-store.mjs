@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { decryptJson, encryptJson } from './crypto.mjs';
 
-function tokenSummary(record) {
+export function tokenSummary(record) {
   const accessExpiry = Date.parse(record.expires_at || '');
   const refreshExpiry = Date.parse(record.refresh_token_expires_at || '');
 
@@ -26,7 +26,24 @@ function tokenSummary(record) {
   };
 }
 
-export class TokenStore {
+function assertValidSupabaseTableName(table) {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(table)) {
+    throw new Error('SUPABASE_TOKEN_TABLE must be a simple table name.');
+  }
+}
+
+async function parseJsonResponse(response) {
+  const text = await response.text();
+  if (!text) return null;
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { raw: text };
+  }
+}
+
+export class FileTokenStore {
   constructor(filePath, encryptionKey) {
     this.filePath = filePath;
     this.encryptionKey = encryptionKey;
@@ -77,4 +94,102 @@ export class TokenStore {
     const records = await this.readAll();
     return Object.values(records).map(tokenSummary);
   }
+}
+
+export class SupabaseTokenStore {
+  constructor({ url, key, table, encryptionKey, fetchImpl = fetch }) {
+    assertValidSupabaseTableName(table);
+    this.url = url.replace(/\/+$/, '');
+    this.key = key;
+    this.table = table;
+    this.encryptionKey = encryptionKey;
+    this.fetchImpl = fetchImpl;
+  }
+
+  requestUrl(query = '') {
+    return `${this.url}/rest/v1/${this.table}${query}`;
+  }
+
+  headers(extra = {}) {
+    return {
+      apikey: this.key,
+      Authorization: `Bearer ${this.key}`,
+      'Content-Type': 'application/json',
+      ...extra
+    };
+  }
+
+  async request(query, options = {}) {
+    const response = await this.fetchImpl(this.requestUrl(query), {
+      ...options,
+      headers: this.headers(options.headers || {})
+    });
+    const payload = await parseJsonResponse(response);
+
+    if (!response.ok) {
+      const message = payload?.message || payload?.hint || payload?.raw || 'Supabase token store request failed.';
+      throw new Error(message);
+    }
+
+    return payload;
+  }
+
+  async get(mallId) {
+    const rows = await this.request(
+      `?mall_id=eq.${encodeURIComponent(mallId)}&select=mall_id,envelope,updated_at&limit=1`
+    );
+    const row = Array.isArray(rows) ? rows[0] : null;
+    if (!row) return null;
+
+    return decryptJson(row.envelope, this.encryptionKey);
+  }
+
+  async set(mallId, tokenPayload, extra = {}) {
+    const existingRecord = await this.get(mallId);
+    const now = new Date().toISOString();
+    const record = {
+      ...existingRecord,
+      ...tokenPayload,
+      ...extra,
+      mall_id: tokenPayload.mall_id || mallId,
+      stored_at: existingRecord?.stored_at || now,
+      updated_at: now
+    };
+
+    await this.request(`?on_conflict=mall_id`, {
+      method: 'POST',
+      headers: {
+        Prefer: 'resolution=merge-duplicates'
+      },
+      body: JSON.stringify({
+        mall_id: mallId,
+        envelope: encryptJson(record, this.encryptionKey),
+        updated_at: now
+      })
+    });
+
+    return record;
+  }
+
+  async listSummaries() {
+    const rows = await this.request('?select=mall_id,envelope,updated_at');
+    return (Array.isArray(rows) ? rows : [])
+      .map((row) => decryptJson(row.envelope, this.encryptionKey))
+      .map(tokenSummary);
+  }
+}
+
+export class TokenStore extends FileTokenStore {}
+
+export function createTokenStore(config) {
+  if (config.tokenStoreProvider === 'supabase') {
+    return new SupabaseTokenStore({
+      url: config.supabase.url,
+      key: config.supabase.key,
+      table: config.supabase.table,
+      encryptionKey: config.encryptionKey
+    });
+  }
+
+  return new FileTokenStore(config.tokenStorePath, config.encryptionKey || 'missing-dev-key');
 }
