@@ -41,6 +41,12 @@ function parseList(value) {
     .filter(Boolean);
 }
 
+function parsePositiveInt(value, defaultValue) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) return defaultValue;
+  return parsed;
+}
+
 export function createConfig(env = process.env) {
   const publicBaseUrl = (env.PUBLIC_BASE_URL || env.RENDER_EXTERNAL_URL || '').replace(/\/+$/, '');
   const tokenStorePath = env.CAFE24_TOKEN_STORE_PATH || './data/tokens.enc.json';
@@ -66,7 +72,14 @@ export function createConfig(env = process.env) {
           '/api/v2/admin/orders,/api/v2/admin/products,/api/v2/admin/categories'
       )
     },
-    internalApiKey: env.INTERNAL_API_KEY || '',
+    internal: {
+      apiKey: env.INTERNAL_API_KEY || '',
+      allowedOrigins: parseList(env.INTERNAL_ALLOWED_ORIGINS || ''),
+      allowedIps: parseList(env.INTERNAL_ALLOWED_IPS || ''),
+      rateLimitMax: parsePositiveInt(env.INTERNAL_RATE_LIMIT_MAX, 120),
+      rateLimitWindowMs: parsePositiveInt(env.INTERNAL_RATE_LIMIT_WINDOW_MS, 60 * 1000),
+      exposeCafe24ErrorBody: env.INTERNAL_EXPOSE_CAFE24_ERROR_BODY === 'true'
+    },
     encryptionKey,
     oauthStateSecret: env.CAFE24_OAUTH_STATE_SECRET || encryptionKey,
     tokenStorePath: path.resolve(tokenStorePath)
@@ -81,7 +94,7 @@ export function getMissingSetup(config) {
   if (!config.cafe24.clientSecret) missing.push('CAFE24_CLIENT_SECRET');
   if (!config.encryptionKey) missing.push('CAFE24_TOKEN_ENCRYPTION_KEY');
   if (!config.oauthStateSecret) missing.push('CAFE24_OAUTH_STATE_SECRET');
-  if (!config.internalApiKey) missing.push('INTERNAL_API_KEY');
+  if (!config.internal.apiKey) missing.push('INTERNAL_API_KEY');
 
   return missing;
 }

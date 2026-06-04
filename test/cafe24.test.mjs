@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { buildAuthorizationUrl, isAccessTokenExpiring } from '../src/cafe24.mjs';
+import { buildAuthorizationUrl, callCafe24AdminGet, Cafe24ProxyError, isAccessTokenExpiring } from '../src/cafe24.mjs';
 import { createConfig } from '../src/config.mjs';
 
 test('buildAuthorizationUrl creates Cafe24 authorize URLs', () => {
@@ -37,5 +37,38 @@ test('createConfig falls back to Render external URL', () => {
   assert.equal(
     config.redirectUri,
     'https://cafe24-ai-connector.onrender.com/cafe24/oauth/callback'
+  );
+});
+
+test('createConfig reads internal security settings', () => {
+  const config = createConfig({
+    INTERNAL_API_KEY: 'secret',
+    INTERNAL_ALLOWED_ORIGINS: 'https://app.example.com',
+    INTERNAL_ALLOWED_IPS: '203.0.113.10,198.51.100.0/24',
+    INTERNAL_RATE_LIMIT_MAX: '30',
+    INTERNAL_RATE_LIMIT_WINDOW_MS: '10000',
+    INTERNAL_EXPOSE_CAFE24_ERROR_BODY: 'true'
+  });
+
+  assert.equal(config.internal.apiKey, 'secret');
+  assert.deepEqual(config.internal.allowedOrigins, ['https://app.example.com']);
+  assert.deepEqual(config.internal.allowedIps, ['203.0.113.10', '198.51.100.0/24']);
+  assert.equal(config.internal.rateLimitMax, 30);
+  assert.equal(config.internal.rateLimitWindowMs, 10000);
+  assert.equal(config.internal.exposeCafe24ErrorBody, true);
+});
+
+test('callCafe24AdminGet blocks paths outside the allowlist before fetch', async () => {
+  await assert.rejects(
+    () =>
+      callCafe24AdminGet({
+        mallId: 'samplemall',
+        resourcePath: '/api/v2/admin/customers',
+        query: new URLSearchParams(),
+        accessToken: 'token',
+        apiVersion: '2026-03-01',
+        allowedPrefixes: ['/api/v2/admin/orders']
+      }),
+    (error) => error instanceof Cafe24ProxyError && error.status === 403
   );
 });

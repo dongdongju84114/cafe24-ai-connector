@@ -4,10 +4,22 @@ import { buildAuthorizationUrl, callCafe24AdminGet, exchangeAuthorizationCode, g
 import { getMissingSetup, getRuntimeConfig } from './config.mjs';
 import { constantTimeBearerMatches, verifyState } from './crypto.mjs';
 import { appPage, callbackSuccessPage, errorPage } from './html.mjs';
+import {
+  createRateLimiter,
+  getClientIp,
+  getRateLimitKey,
+  isIpAllowed,
+  isOriginAllowed,
+  setCorsHeaders
+} from './security.mjs';
 import { TokenStore } from './token-store.mjs';
 
 const config = getRuntimeConfig();
 const tokenStore = new TokenStore(config.tokenStorePath, config.encryptionKey || 'missing-dev-key');
+const internalRateLimiter = createRateLimiter({
+  maxRequests: config.internal.rateLimitMax,
+  windowMs: config.internal.rateLimitWindowMs
+});
 
 function sendJson(response, statusCode, payload) {
   response.writeHead(statusCode, {
@@ -25,6 +37,13 @@ function sendHtml(response, statusCode, html) {
   response.end(html);
 }
 
+function sendNoContent(response, statusCode) {
+  response.writeHead(statusCode, {
+    'Cache-Control': 'no-store'
+  });
+  response.end();
+}
+
 function redirect(response, location) {
   response.writeHead(302, {
     Location: location,
@@ -34,19 +53,57 @@ function redirect(response, location) {
 }
 
 function hasInternalAccess(request) {
-  if (constantTimeBearerMatches(request.headers.authorization || '', config.internalApiKey)) {
+  if (constantTimeBearerMatches(request.headers.authorization || '', config.internal.apiKey)) {
     return true;
   }
   return constantTimeBearerMatches(
     `Bearer ${request.headers['x-internal-api-key'] || ''}`,
-    config.internalApiKey
+    config.internal.apiKey
   );
 }
 
+function isInternalPath(pathname) {
+  return pathname === '/' ||
+    pathname === '/internal/cafe24/token' ||
+    pathname === '/internal/cafe24/status' ||
+    pathname === '/internal/cafe24/orders' ||
+    pathname.startsWith('/internal/cafe24/admin/');
+}
+
 function requireInternalAccess(request, response) {
+  if (!isOriginAllowed(request, config.internal.allowedOrigins)) {
+    sendJson(response, 403, { error: 'forbidden', message: 'Origin is not allowed.' });
+    return false;
+  }
+
+  const clientIp = getClientIp(request);
+  if (!isIpAllowed(clientIp, config.internal.allowedIps)) {
+    sendJson(response, 403, { error: 'forbidden', message: 'Client IP is not allowed.' });
+    return false;
+  }
+
+  const rateLimit = internalRateLimiter.check(getRateLimitKey(request));
+  response.setHeader('X-RateLimit-Limit', String(config.internal.rateLimitMax));
+  response.setHeader('X-RateLimit-Remaining', String(rateLimit.remaining));
+  if (!rateLimit.allowed) {
+    response.setHeader('Retry-After', String(rateLimit.retryAfterSeconds));
+    sendJson(response, 429, { error: 'rate_limited', retry_after_seconds: rateLimit.retryAfterSeconds });
+    return false;
+  }
+
   if (hasInternalAccess(request)) return true;
   sendJson(response, 401, { error: 'unauthorized' });
   return false;
+}
+
+function handleInternalOptions(request, response) {
+  if (!isOriginAllowed(request, config.internal.allowedOrigins)) {
+    sendJson(response, 403, { error: 'forbidden', message: 'Origin is not allowed.' });
+    return;
+  }
+
+  setCorsHeaders(request, response, config.internal.allowedOrigins);
+  sendNoContent(response, 204);
 }
 
 function requireConfigured(response, fields) {
@@ -61,6 +118,17 @@ function requireConfigured(response, fields) {
       message: `다음 환경변수를 설정하세요: ${missing.join(', ')}`
     })
   );
+  return false;
+}
+
+function requireConfiguredJson(response, fields) {
+  const missing = getMissingSetup(config).filter((field) => fields.includes(field));
+  if (!missing.length) return true;
+
+  sendJson(response, 500, {
+    error: 'missing_setup',
+    missing_setup: missing
+  });
   return false;
 }
 
@@ -189,6 +257,37 @@ async function handleInternalStatus(request, response) {
   });
 }
 
+async function handleAccessToken(url, request, response) {
+  if (!requireInternalAccess(request, response)) return;
+  if (
+    !requireConfiguredJson(response, [
+      'CAFE24_CLIENT_ID',
+      'CAFE24_CLIENT_SECRET',
+      'CAFE24_TOKEN_ENCRYPTION_KEY'
+    ])
+  ) {
+    return;
+  }
+
+  const mallId = getMallId(url);
+  if (!mallId) {
+    sendJson(response, 400, {
+      error: 'bad_request',
+      message: 'mall_id is required.'
+    });
+    return;
+  }
+
+  const token = await getFreshToken({ tokenStore, mallId, config });
+  sendJson(response, 200, {
+    mall_id: mallId,
+    token_type: token.token_type || 'Bearer',
+    access_token: token.access_token,
+    expires_at: token.expires_at || null,
+    scopes: Array.isArray(token.scopes) ? token.scopes : []
+  });
+}
+
 async function handleOrders(url, request, response) {
   if (!requireInternalAccess(request, response)) return;
 
@@ -258,13 +357,27 @@ async function handleAdminProxy(url, request, response) {
 
 async function route(request, response) {
   const url = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
+  const internalPath = isInternalPath(url.pathname);
+  if (internalPath) {
+    setCorsHeaders(request, response, config.internal.allowedOrigins);
+  }
+
+  if (request.method === 'OPTIONS' && internalPath) {
+    handleInternalOptions(request, response);
+    return;
+  }
 
   if (request.method === 'GET' && url.pathname === '/healthz') {
     sendJson(response, 200, { ok: true, service: 'cafe24-ai-connector' });
     return;
   }
 
-  if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/cafe24/app')) {
+  if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/internal/cafe24/token')) {
+    await handleAccessToken(url, request, response);
+    return;
+  }
+
+  if (request.method === 'GET' && url.pathname === '/cafe24/app') {
     await handleApp(request, response);
     return;
   }
@@ -305,18 +418,33 @@ async function route(request, response) {
 const server = http.createServer(async (request, response) => {
   const startedAt = Date.now();
   response.setHeader('X-Content-Type-Options', 'nosniff');
+  response.setHeader('X-Frame-Options', 'DENY');
   response.setHeader('Referrer-Policy', 'no-referrer');
+  response.setHeader(
+    'Content-Security-Policy',
+    "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+  );
 
   try {
     await route(request, response);
   } catch (error) {
+    const url = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
     const status = error.status || 500;
-    sendJson(response, status, {
+    const payload = {
       error: status >= 500 ? 'internal_error' : 'request_failed',
       message: error.message,
-      cafe24_status: error.status || undefined,
-      cafe24_response: error.responseBody || undefined
-    });
+      cafe24_status: error.status || undefined
+    };
+
+    if (
+      config.internal.exposeCafe24ErrorBody &&
+      isInternalPath(url.pathname) &&
+      error.responseBody !== undefined
+    ) {
+      payload.cafe24_response = error.responseBody;
+    }
+
+    sendJson(response, status, payload);
   } finally {
     const url = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
     console.log(

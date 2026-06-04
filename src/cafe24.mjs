@@ -10,6 +10,14 @@ export class Cafe24ApiError extends Error {
   }
 }
 
+export class Cafe24ProxyError extends Error {
+  constructor(message, status = 403) {
+    super(message);
+    this.name = 'Cafe24ProxyError';
+    this.status = status;
+  }
+}
+
 export function buildAuthorizationUrl({ mallId, clientId, redirectUri, scopes, stateSecret }) {
   const state = signState(
     {
@@ -115,11 +123,11 @@ export async function getFreshToken({ tokenStore, mallId, config }) {
 
 function assertAllowedReadPath(resourcePath, allowedPrefixes) {
   if (!resourcePath.startsWith('/api/v2/admin/')) {
-    throw new Error('Only Cafe24 Admin API paths under /api/v2/admin/ are allowed.');
+    throw new Cafe24ProxyError('Only Cafe24 Admin API paths under /api/v2/admin/ are allowed.', 400);
   }
 
   if (!allowedPrefixes.some((prefix) => resourcePath.startsWith(prefix))) {
-    throw new Error(`Cafe24 Admin API path is not allowlisted: ${resourcePath}`);
+    throw new Cafe24ProxyError(`Cafe24 Admin API path is not allowlisted: ${resourcePath}`, 403);
   }
 }
 
