@@ -126,6 +126,53 @@ test('getFreshToken requires reconnect when stored refresh token is expired', as
   );
 });
 
+test('getFreshToken force refreshes even when stored access token is still valid', async () => {
+  const previousFetch = globalThis.fetch;
+  let savedToken = null;
+  const tokenStore = {
+    async get() {
+      return {
+        access_token: 'still-valid-access',
+        expires_at: '2099-01-01T00:00:00.000',
+        refresh_token: 'usable-refresh',
+        refresh_token_expires_at: '2099-01-15T00:00:00.000'
+      };
+    },
+    async set(_mallId, tokenPayload, extra) {
+      savedToken = { ...tokenPayload, ...extra };
+      return savedToken;
+    }
+  };
+
+  globalThis.fetch = async () => new Response(
+    JSON.stringify({
+      access_token: 'force-refreshed-access',
+      refresh_token: 'rotated-refresh',
+      expires_at: '2099-01-01T02:00:00.000',
+      refresh_token_expires_at: '2099-01-15T02:00:00.000'
+    }),
+    { status: 200, headers: { 'Content-Type': 'application/json' } }
+  );
+
+  try {
+    const token = await getFreshToken({
+      tokenStore,
+      mallId: 'opengallery12',
+      config: createConfig({
+        CAFE24_CLIENT_ID: 'client-id',
+        CAFE24_CLIENT_SECRET: 'client-secret'
+      }),
+      forceRefresh: true
+    });
+
+    assert.equal(token.access_token, 'force-refreshed-access');
+    assert.equal(savedToken.refresh_token, 'rotated-refresh');
+    assert.ok(savedToken.refreshed_at);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
 test('getFreshToken requires reconnect when Cafe24 rejects refresh token', async () => {
   const previousFetch = globalThis.fetch;
   const tokenStore = {

@@ -286,7 +286,13 @@ async function handleAccessToken(url, request, response) {
     return;
   }
 
-  const token = await getFreshToken({ tokenStore, mallId, config });
+  const token = await getFreshToken({
+    tokenStore,
+    mallId,
+    config,
+    forceRefresh: url.searchParams.get('force_refresh') === '1'
+      || url.searchParams.get('refresh') === '1',
+  });
   sendJson(response, 200, {
     mall_id: mallId,
     token_type: token.token_type || 'Bearer',

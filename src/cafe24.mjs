@@ -134,7 +134,7 @@ function isReconnectRequiredTokenError(error) {
     serialized.includes('expired');
 }
 
-export async function getFreshToken({ tokenStore, mallId, config }) {
+export async function getFreshToken({ tokenStore, mallId, config, forceRefresh = false }) {
   const currentToken = await tokenStore.get(mallId);
   if (!currentToken) {
     throw new Cafe24ReconnectRequiredError(`No Cafe24 token is stored for mall_id=${mallId}.`, {
@@ -143,7 +143,7 @@ export async function getFreshToken({ tokenStore, mallId, config }) {
     });
   }
 
-  if (!isAccessTokenExpiring(currentToken) && !isRefreshTokenExpiring(currentToken)) {
+  if (!forceRefresh && !isAccessTokenExpiring(currentToken) && !isRefreshTokenExpiring(currentToken)) {
     return currentToken;
   }
 
