@@ -439,17 +439,25 @@ const server = http.createServer(async (request, response) => {
     const url = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
     const status = error.status || 500;
     const payload = {
-      error: status >= 500 ? 'internal_error' : 'request_failed',
+      error: error.code || (status >= 500 ? 'internal_error' : 'request_failed'),
       message: error.message,
-      cafe24_status: error.status || undefined
+      cafe24_status: error.details?.cafe24_status || error.status || undefined,
+      reconnect_required: error.code === 'reconnect_required' || undefined,
+      reconnect_url: error.code === 'reconnect_required'
+        ? reconnectUrl(error.details?.mall_id)
+        : undefined
     };
+
+    if (error.details?.reason) {
+      payload.reason = error.details.reason;
+    }
 
     if (
       config.internal.exposeCafe24ErrorBody &&
       isInternalPath(url.pathname) &&
-      error.responseBody !== undefined
+      (error.responseBody !== undefined || error.details?.cafe24_response !== undefined)
     ) {
-      payload.cafe24_response = error.responseBody;
+      payload.cafe24_response = error.responseBody ?? error.details.cafe24_response;
     }
 
     sendJson(response, status, payload);
@@ -464,3 +472,11 @@ const server = http.createServer(async (request, response) => {
 server.listen(config.port, config.host, () => {
   console.log(`Cafe24 AI connector listening on http://${config.host}:${config.port}`);
 });
+
+function reconnectUrl(mallId) {
+  const query = mallId ? `?mall_id=${encodeURIComponent(mallId)}` : '';
+  if (config.publicBaseUrl) {
+    return `${config.publicBaseUrl}/cafe24/oauth/start${query}`;
+  }
+  return `/cafe24/oauth/start${query}`;
+}

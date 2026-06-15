@@ -1,10 +1,22 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { decryptJson, encryptJson } from './crypto.mjs';
+import { parseCafe24TimestampMs } from './dates.mjs';
+
+const ACCESS_EXPIRING_SOON_SECONDS = 5 * 60;
+const REFRESH_EXPIRING_SOON_SECONDS = 2 * 24 * 60 * 60;
 
 export function tokenSummary(record) {
-  const accessExpiry = Date.parse(record.expires_at || '');
-  const refreshExpiry = Date.parse(record.refresh_token_expires_at || '');
+  const accessExpiry = parseCafe24TimestampMs(record.expires_at || '');
+  const refreshExpiry = parseCafe24TimestampMs(record.refresh_token_expires_at || '');
+  const accessTokenExpiresInSeconds = Number.isNaN(accessExpiry)
+    ? null
+    : Math.floor((accessExpiry - Date.now()) / 1000);
+  const refreshTokenExpiresInSeconds = Number.isNaN(refreshExpiry)
+    ? null
+    : Math.floor((refreshExpiry - Date.now()) / 1000);
+  const hasRefreshToken = Boolean(record.refresh_token);
+  const refreshTokenStatus = refreshStatus(hasRefreshToken, refreshTokenExpiresInSeconds);
 
   return {
     mall_id: record.mall_id,
@@ -14,16 +26,41 @@ export function tokenSummary(record) {
     issued_at: record.issued_at || null,
     expires_at: record.expires_at || null,
     refresh_token_expires_at: record.refresh_token_expires_at || null,
-    access_token_expires_in_seconds: Number.isNaN(accessExpiry)
-      ? null
-      : Math.floor((accessExpiry - Date.now()) / 1000),
-    refresh_token_expires_in_seconds: Number.isNaN(refreshExpiry)
-      ? null
-      : Math.floor((refreshExpiry - Date.now()) / 1000),
-    has_refresh_token: Boolean(record.refresh_token),
+    access_token_expires_in_seconds: accessTokenExpiresInSeconds,
+    refresh_token_expires_in_seconds: refreshTokenExpiresInSeconds,
+    access_token_status: accessStatus(accessTokenExpiresInSeconds),
+    refresh_token_status: refreshTokenStatus,
+    reconnect_required: refreshTokenStatus === 'missing' || refreshTokenStatus === 'expired',
+    recommended_action: recommendedAction(refreshTokenStatus),
+    has_refresh_token: hasRefreshToken,
     stored_at: record.stored_at || null,
     refreshed_at: record.refreshed_at || null
   };
+}
+
+function accessStatus(expiresInSeconds) {
+  if (expiresInSeconds === null) return 'unknown';
+  if (expiresInSeconds <= 0) return 'expired';
+  if (expiresInSeconds <= ACCESS_EXPIRING_SOON_SECONDS) return 'expiring_soon';
+  return 'valid';
+}
+
+function refreshStatus(hasRefreshToken, expiresInSeconds) {
+  if (!hasRefreshToken) return 'missing';
+  if (expiresInSeconds === null) return 'unknown';
+  if (expiresInSeconds <= 0) return 'expired';
+  if (expiresInSeconds <= REFRESH_EXPIRING_SOON_SECONDS) return 'expiring_soon';
+  return 'valid';
+}
+
+function recommendedAction(refreshTokenStatus) {
+  if (refreshTokenStatus === 'missing' || refreshTokenStatus === 'expired') {
+    return 'Cafe24 OAuth 재연결이 필요합니다.';
+  }
+  if (refreshTokenStatus === 'expiring_soon') {
+    return '곧 만료됩니다. 재연결하거나 토큰 요청으로 만료 전에 갱신하세요.';
+  }
+  return null;
 }
 
 function assertValidSupabaseTableName(table) {

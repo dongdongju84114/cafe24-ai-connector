@@ -1,7 +1,15 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { buildAuthorizationUrl, callCafe24AdminGet, Cafe24ProxyError, isAccessTokenExpiring } from '../src/cafe24.mjs';
+import {
+  buildAuthorizationUrl,
+  Cafe24ProxyError,
+  Cafe24ReconnectRequiredError,
+  callCafe24AdminGet,
+  getFreshToken,
+  isAccessTokenExpiring
+} from '../src/cafe24.mjs';
 import { createConfig } from '../src/config.mjs';
+import { parseCafe24TimestampMs } from '../src/dates.mjs';
 
 test('buildAuthorizationUrl creates Cafe24 authorize URLs', () => {
   const url = buildAuthorizationUrl({
@@ -24,6 +32,17 @@ test('buildAuthorizationUrl creates Cafe24 authorize URLs', () => {
 test('isAccessTokenExpiring treats missing and old expirations as expiring', () => {
   assert.equal(isAccessTokenExpiring({}), true);
   assert.equal(isAccessTokenExpiring({ expires_at: '2000-01-01T00:00:00.000Z' }), true);
+});
+
+test('Cafe24 token timestamps without timezone are interpreted as Korea time', () => {
+  assert.equal(
+    parseCafe24TimestampMs('2026-06-15T14:58:37.000'),
+    Date.parse('2026-06-15T14:58:37.000+09:00')
+  );
+  assert.equal(
+    parseCafe24TimestampMs('2026-06-15T14:58:37.000Z'),
+    Date.parse('2026-06-15T14:58:37.000Z')
+  );
 });
 
 test('createConfig falls back to Render external URL', () => {
@@ -84,4 +103,64 @@ test('callCafe24AdminGet blocks paths outside the allowlist before fetch', async
       }),
     (error) => error instanceof Cafe24ProxyError && error.status === 403
   );
+});
+
+test('getFreshToken requires reconnect when stored refresh token is expired', async () => {
+  const tokenStore = {
+    async get() {
+      return {
+        access_token: 'old-access',
+        expires_at: '2000-01-01T00:00:00.000',
+        refresh_token: 'old-refresh',
+        refresh_token_expires_at: '2000-01-01T00:00:00.000'
+      };
+    }
+  };
+
+  await assert.rejects(
+    () => getFreshToken({ tokenStore, mallId: 'opengallery12', config: createConfig({}) }),
+    (error) =>
+      error instanceof Cafe24ReconnectRequiredError &&
+      error.code === 'reconnect_required' &&
+      error.details.reason === 'refresh_token_expired'
+  );
+});
+
+test('getFreshToken requires reconnect when Cafe24 rejects refresh token', async () => {
+  const previousFetch = globalThis.fetch;
+  const tokenStore = {
+    async get() {
+      return {
+        access_token: 'old-access',
+        expires_at: '2000-01-01T00:00:00.000',
+        refresh_token: 'rejected-refresh',
+        refresh_token_expires_at: '2099-01-01T00:00:00.000'
+      };
+    }
+  };
+
+  globalThis.fetch = async () => new Response(
+    JSON.stringify({ error: 'invalid_grant', error_description: 'refresh token expired' }),
+    { status: 400, headers: { 'Content-Type': 'application/json' } }
+  );
+
+  try {
+    await assert.rejects(
+      () =>
+        getFreshToken({
+          tokenStore,
+          mallId: 'opengallery12',
+          config: createConfig({
+            CAFE24_CLIENT_ID: 'client-id',
+            CAFE24_CLIENT_SECRET: 'client-secret'
+          })
+        }),
+      (error) =>
+        error instanceof Cafe24ReconnectRequiredError &&
+        error.code === 'reconnect_required' &&
+        error.details.reason === 'refresh_token_rejected'
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
 });

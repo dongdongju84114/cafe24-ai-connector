@@ -86,6 +86,12 @@ function layout(title, body) {
       background: #fff4d6;
       color: #5f4300;
     }
+    .danger {
+      padding: 12px;
+      border-radius: 6px;
+      background: #ffe8e8;
+      color: #7a1c1c;
+    }
     .success {
       padding: 12px;
       border-radius: 6px;
@@ -111,12 +117,7 @@ export function appPage({ config, missingSetup, connectedMalls }) {
   const defaultMallId = config.cafe24.defaultMallId || '';
   const connectedList = connectedMalls.length
     ? `<ul class="list">${connectedMalls
-        .map(
-          (mall) =>
-            `<li><strong>${escapeHtml(mall.mall_id)}</strong> · scope ${escapeHtml(
-              mall.scopes.length
-            )}개 · access ${escapeHtml(mall.access_token_expires_in_seconds)}초 남음</li>`
-        )
+        .map((mall) => renderMallStatus(mall))
         .join('')}</ul>`
     : '<p class="muted">아직 연결된 쇼핑몰이 없습니다.</p>';
 
@@ -149,6 +150,54 @@ export function appPage({ config, missingSetup, connectedMalls }) {
     <h2>연결 상태</h2>
     ${connectedList}`
   );
+}
+
+function renderMallStatus(mall) {
+  const mallId = mall.mall_id || '';
+  const reconnectLink = `/cafe24/oauth/start?mall_id=${encodeURIComponent(mallId)}`;
+  const statusClass = mall.reconnect_required
+    ? 'danger'
+    : mall.refresh_token_status === 'expiring_soon'
+      ? 'warning'
+      : '';
+  const action = mall.reconnect_required || mall.refresh_token_status === 'expiring_soon'
+    ? ` <a class="button" href="${escapeHtml(reconnectLink)}">카페24 권한 다시 연결하기</a>`
+    : '';
+  const recommendedAction = mall.recommended_action
+    ? `<br><span class="muted">${escapeHtml(mall.recommended_action)}</span>`
+    : '';
+
+  return `<li${statusClass ? ` class="${statusClass}"` : ''}><strong>${escapeHtml(mallId)}</strong> · scope ${escapeHtml(
+    mall.scopes.length
+  )}개 · access ${escapeHtml(formatSeconds(mall.access_token_expires_in_seconds))} · refresh ${escapeHtml(
+    formatRefreshStatus(mall)
+  )}${recommendedAction}${action}</li>`;
+}
+
+function formatSeconds(value) {
+  if (value === null || value === undefined) {
+    return '만료시간 미확인';
+  }
+  if (value <= 0) {
+    return '만료됨';
+  }
+  return `${value}초 남음`;
+}
+
+function formatRefreshStatus(mall) {
+  if (mall.refresh_token_status === 'missing') {
+    return '없음';
+  }
+  if (mall.refresh_token_status === 'expired') {
+    return '만료됨';
+  }
+  if (mall.refresh_token_status === 'expiring_soon') {
+    return `${formatSeconds(mall.refresh_token_expires_in_seconds)} · 곧 만료`;
+  }
+  if (mall.refresh_token_status === 'unknown') {
+    return '만료시간 미확인';
+  }
+  return formatSeconds(mall.refresh_token_expires_in_seconds);
 }
 
 export function callbackSuccessPage({ mallId, scopes }) {

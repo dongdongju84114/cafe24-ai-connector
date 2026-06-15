@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { signState } from './crypto.mjs';
+import { parseCafe24TimestampMs } from './dates.mjs';
 
 export class Cafe24ApiError extends Error {
   constructor(message, status, responseBody) {
@@ -7,6 +8,16 @@ export class Cafe24ApiError extends Error {
     this.name = 'Cafe24ApiError';
     this.status = status;
     this.responseBody = responseBody;
+  }
+}
+
+export class Cafe24ReconnectRequiredError extends Error {
+  constructor(message, details = {}) {
+    super(message);
+    this.name = 'Cafe24ReconnectRequiredError';
+    this.status = 409;
+    this.code = 'reconnect_required';
+    this.details = details;
   }
 }
 
@@ -90,31 +101,87 @@ export function refreshAccessToken({ mallId, clientId, clientSecret, refreshToke
 }
 
 export function isAccessTokenExpiring(tokenPayload, skewMs = 5 * 60 * 1000) {
-  const expiresAt = Date.parse(tokenPayload?.expires_at || '');
+  const expiresAt = parseCafe24TimestampMs(tokenPayload?.expires_at || '');
   if (Number.isNaN(expiresAt)) return true;
   return expiresAt - Date.now() <= skewMs;
+}
+
+export function isRefreshTokenExpired(tokenPayload) {
+  const expiresAt = parseCafe24TimestampMs(tokenPayload?.refresh_token_expires_at || '');
+  if (Number.isNaN(expiresAt)) return false;
+  return expiresAt - Date.now() <= 0;
+}
+
+export function isRefreshTokenExpiring(tokenPayload, skewMs = 24 * 60 * 60 * 1000) {
+  const expiresAt = parseCafe24TimestampMs(tokenPayload?.refresh_token_expires_at || '');
+  if (Number.isNaN(expiresAt)) return false;
+  return expiresAt - Date.now() <= skewMs;
+}
+
+function isReconnectRequiredTokenError(error) {
+  if (!(error instanceof Cafe24ApiError)) {
+    return false;
+  }
+
+  if (error.status === 400 || error.status === 401) {
+    return true;
+  }
+
+  const serialized = JSON.stringify(error.responseBody || '').toLowerCase();
+  return serialized.includes('invalid_grant') ||
+    serialized.includes('invalid refresh') ||
+    serialized.includes('refresh_token') ||
+    serialized.includes('expired');
 }
 
 export async function getFreshToken({ tokenStore, mallId, config }) {
   const currentToken = await tokenStore.get(mallId);
   if (!currentToken) {
-    throw new Error(`No Cafe24 token is stored for mall_id=${mallId}.`);
+    throw new Cafe24ReconnectRequiredError(`No Cafe24 token is stored for mall_id=${mallId}.`, {
+      mall_id: mallId,
+      reason: 'missing_token'
+    });
   }
 
-  if (!isAccessTokenExpiring(currentToken)) {
+  if (!isAccessTokenExpiring(currentToken) && !isRefreshTokenExpiring(currentToken)) {
     return currentToken;
   }
 
   if (!currentToken.refresh_token) {
-    throw new Error(`No refresh token is stored for mall_id=${mallId}. Reconnect Cafe24 OAuth.`);
+    throw new Cafe24ReconnectRequiredError(`No refresh token is stored for mall_id=${mallId}. Reconnect Cafe24 OAuth.`, {
+      mall_id: mallId,
+      reason: 'missing_refresh_token'
+    });
   }
 
-  const refreshedToken = await refreshAccessToken({
-    mallId,
-    clientId: config.cafe24.clientId,
-    clientSecret: config.cafe24.clientSecret,
-    refreshToken: currentToken.refresh_token
-  });
+  if (isRefreshTokenExpired(currentToken)) {
+    throw new Cafe24ReconnectRequiredError(`Cafe24 refresh token expired for mall_id=${mallId}. Reconnect Cafe24 OAuth.`, {
+      mall_id: mallId,
+      reason: 'refresh_token_expired',
+      refresh_token_expires_at: currentToken.refresh_token_expires_at || null
+    });
+  }
+
+  let refreshedToken;
+  try {
+    refreshedToken = await refreshAccessToken({
+      mallId,
+      clientId: config.cafe24.clientId,
+      clientSecret: config.cafe24.clientSecret,
+      refreshToken: currentToken.refresh_token
+    });
+  } catch (error) {
+    if (isReconnectRequiredTokenError(error)) {
+      throw new Cafe24ReconnectRequiredError(`Cafe24 refresh token could not be used for mall_id=${mallId}. Reconnect Cafe24 OAuth.`, {
+        mall_id: mallId,
+        reason: 'refresh_token_rejected',
+        cafe24_status: error.status,
+        cafe24_response: error.responseBody
+      });
+    }
+
+    throw error;
+  }
 
   return tokenStore.set(mallId, refreshedToken, {
     refreshed_at: new Date().toISOString()
