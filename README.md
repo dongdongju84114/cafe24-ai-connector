@@ -109,7 +109,7 @@ https://cafe24-ai-connector.onrender.com/cafe24/oauth/callback
 
 Render는 web service에 `RENDER_EXTERNAL_URL`을 자동으로 넣어주므로, `PUBLIC_BASE_URL`을 따로 설정하지 않아도 이 URL을 기준으로 App URL/Redirect URI를 화면에 표시합니다. 나중에 custom domain을 붙이면 `PUBLIC_BASE_URL=https://your-domain`으로 직접 지정하세요.
 
-기본 `render.yaml`은 Render 유료 단일 인스턴스와 `/var/data` Persistent Disk를 사용합니다. Cafe24 token은 `/var/data/cafe24-token-store.sqlite3`에 암호화해 저장하므로 redeploy/restart 이후에도 보존됩니다.
+기본 `render.yaml`은 Render 무료 web service를 유지합니다. 무료 인스턴스는 Persistent Disk를 지원하지 않으므로 운영 token은 기존 Supabase 저장소에 보관해야 합니다.
 
 실제 Cafe24 OAuth 연결 전에 Render 환경변수에 아래 값을 추가하세요.
 
@@ -119,7 +119,7 @@ CAFE24_CLIENT_SECRET
 CAFE24_DEFAULT_MALL_ID
 ```
 
-Persistent Disk는 단일 인스턴스만 지원하며 배포 중 짧은 중단이 발생할 수 있습니다. 이 커넥터는 단일 인스턴스 운영을 전제로 하고, 종료 신호를 받으면 SQLite 연결을 안전하게 닫습니다.
+유료 전환을 결정한 경우에만 아래의 선택적 Persistent Disk 절차를 적용합니다. 무료 플랜에서는 SQLite 파일을 token의 운영 저장소로 사용하지 않습니다.
 
 ### 옵션 B. Cloudflare Tunnel
 
@@ -208,9 +208,9 @@ SUPABASE_TOKEN_TABLE=cafe24_tokens
 
 Supabase table에는 Cafe24 token 원문을 저장하지 않습니다. 서버가 `CAFE24_TOKEN_ENCRYPTION_KEY`로 token payload를 AES-GCM 암호화한 envelope만 저장합니다.
 
-## Render Persistent Disk + SQLite
+## 선택 사항: Render Persistent Disk + SQLite
 
-운영 Render 서비스는 아래 설정을 사용합니다.
+이 구성은 유료 Render 인스턴스와 Persistent Disk를 사용하기로 결정했을 때만 적용합니다. 기본 `render.yaml`에는 포함하지 않습니다.
 
 ```text
 CAFE24_TOKEN_STORE_PROVIDER=sqlite
@@ -218,7 +218,7 @@ CAFE24_TOKEN_STORE_PATH=/var/data/cafe24-token-store.sqlite3
 CAFE24_TOKEN_MIGRATION_SOURCE=supabase
 ```
 
-배포 순서는 토큰 유실 방지를 위해 고정합니다.
+전환 시 배포 순서는 토큰 유실 방지를 위해 고정합니다.
 
 1. Render 서비스를 유료 단일 인스턴스로 전환하고 `/var/data`에 Persistent Disk를 연결합니다.
 2. SQLite 지원 코드를 배포합니다.
