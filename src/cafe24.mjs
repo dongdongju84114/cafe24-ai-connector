@@ -134,18 +134,33 @@ function isReconnectRequiredTokenError(error) {
     serialized.includes('expired');
 }
 
-export async function getFreshToken({ tokenStore, mallId, config, forceRefresh = false }) {
-  const currentToken = await tokenStore.get(mallId);
+const refreshLocks = new Map();
+
+async function withRefreshLock(mallId, callback) {
+  const previous = refreshLocks.get(mallId) || Promise.resolve();
+  const current = previous.catch(() => undefined).then(callback);
+  refreshLocks.set(mallId, current);
+
+  try {
+    return await current;
+  } finally {
+    if (refreshLocks.get(mallId) === current) {
+      refreshLocks.delete(mallId);
+    }
+  }
+}
+
+function requireStoredToken(currentToken, mallId) {
   if (!currentToken) {
     throw new Cafe24ReconnectRequiredError(`No Cafe24 token is stored for mall_id=${mallId}.`, {
       mall_id: mallId,
       reason: 'missing_token'
     });
   }
+}
 
-  if (!forceRefresh && !isAccessTokenExpiring(currentToken) && !isRefreshTokenExpiring(currentToken)) {
-    return currentToken;
-  }
+async function refreshStoredToken({ tokenStore, mallId, config, currentToken }) {
+  requireStoredToken(currentToken, mallId);
 
   if (!currentToken.refresh_token) {
     throw new Cafe24ReconnectRequiredError(`No refresh token is stored for mall_id=${mallId}. Reconnect Cafe24 OAuth.`, {
@@ -185,6 +200,36 @@ export async function getFreshToken({ tokenStore, mallId, config, forceRefresh =
 
   return tokenStore.set(mallId, refreshedToken, {
     refreshed_at: new Date().toISOString()
+  });
+}
+
+export async function getFreshToken({ tokenStore, mallId, config, forceRefresh = false }) {
+  const observedToken = await tokenStore.get(mallId);
+  requireStoredToken(observedToken, mallId);
+
+  if (
+    !forceRefresh &&
+    !isAccessTokenExpiring(observedToken) &&
+    !isRefreshTokenExpiring(observedToken)
+  ) {
+    return observedToken;
+  }
+
+  return withRefreshLock(mallId, async () => {
+    const latestToken = await tokenStore.get(mallId);
+    requireStoredToken(latestToken, mallId);
+
+    const wasRefreshedByAnotherRequest =
+      latestToken.access_token && latestToken.access_token !== observedToken.access_token;
+    if (
+      (wasRefreshedByAnotherRequest || !forceRefresh) &&
+      !isAccessTokenExpiring(latestToken) &&
+      !isRefreshTokenExpiring(latestToken)
+    ) {
+      return latestToken;
+    }
+
+    return refreshStoredToken({ tokenStore, mallId, config, currentToken: latestToken });
   });
 }
 

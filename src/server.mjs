@@ -143,11 +143,12 @@ function getMallId(url) {
 }
 
 function canReadTokenStore() {
-  return config.encryptionKey &&
-    (
-      config.tokenStoreProvider !== 'supabase' ||
-      (config.supabase.url && config.supabase.key)
-    );
+  if (!config.encryptionKey) return false;
+  if (config.tokenStoreProvider === 'sqlite') return Boolean(config.sqlite.path);
+  if (config.tokenStoreProvider === 'supabase') {
+    return Boolean(config.supabase.url && config.supabase.key);
+  }
+  return config.tokenStoreProvider === 'file';
 }
 
 async function handleApp(_request, response) {
@@ -260,6 +261,7 @@ async function handleInternalStatus(request, response) {
     public_base_url: config.publicBaseUrl,
     app_url: config.appUrl,
     redirect_uri: config.redirectUri,
+    token_store: await tokenStore.healthCheck(),
     missing_setup: getMissingSetup(config),
     connected_malls: await tokenStore.listSummaries()
   });
@@ -382,7 +384,11 @@ async function route(request, response) {
   }
 
   if (request.method === 'GET' && url.pathname === '/healthz') {
-    sendJson(response, 200, { ok: true, service: 'cafe24-ai-connector' });
+    sendJson(response, 200, {
+      ok: true,
+      service: 'cafe24-ai-connector',
+      token_store: await tokenStore.healthCheck()
+    });
     return;
   }
 
@@ -476,8 +482,34 @@ const server = http.createServer(async (request, response) => {
 });
 
 server.listen(config.port, config.host, () => {
-  console.log(`Cafe24 AI connector listening on http://${config.host}:${config.port}`);
+  console.log(
+    `Cafe24 AI connector listening on http://${config.host}:${config.port} with ${config.tokenStoreProvider} token store`
+  );
 });
+
+let shuttingDown = false;
+
+function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`${signal} received. Closing Cafe24 AI connector.`);
+
+  const forceCloseTimer = setTimeout(() => {
+    server.closeAllConnections?.();
+    tokenStore.close();
+    process.exit(1);
+  }, 10_000);
+  forceCloseTimer.unref();
+
+  server.close(() => {
+    clearTimeout(forceCloseTimer);
+    tokenStore.close();
+    process.exit(0);
+  });
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 function reconnectUrl(mallId) {
   const query = mallId ? `?mall_id=${encodeURIComponent(mallId)}` : '';

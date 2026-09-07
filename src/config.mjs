@@ -53,6 +53,8 @@ export function createConfig(env = process.env) {
   const tokenStoreProvider =
     env.CAFE24_TOKEN_STORE_PROVIDER || (env.SUPABASE_URL && supabaseKey ? 'supabase' : 'file');
   const tokenStorePath = env.CAFE24_TOKEN_STORE_PATH || './data/tokens.enc.json';
+  const sqliteTokenStorePath =
+    env.CAFE24_SQLITE_PATH || env.CAFE24_TOKEN_STORE_PATH || './data/cafe24-token-store.sqlite3';
   const encryptionKey = env.CAFE24_TOKEN_ENCRYPTION_KEY || '';
 
   return {
@@ -84,6 +86,10 @@ export function createConfig(env = process.env) {
       exposeCafe24ErrorBody: env.INTERNAL_EXPOSE_CAFE24_ERROR_BODY === 'true'
     },
     tokenStoreProvider,
+    tokenMigrationSource: env.CAFE24_TOKEN_MIGRATION_SOURCE || '',
+    sqlite: {
+      path: path.resolve(sqliteTokenStorePath)
+    },
     supabase: {
       url: (env.SUPABASE_URL || '').replace(/\/+$/, ''),
       key: supabaseKey,
@@ -105,6 +111,10 @@ export function getMissingSetup(config) {
   if (!config.oauthStateSecret) missing.push('CAFE24_OAUTH_STATE_SECRET');
   if (!config.internal.apiKey) missing.push('INTERNAL_API_KEY');
   if (config.tokenStoreProvider === 'supabase') {
+    if (!config.supabase.url) missing.push('SUPABASE_URL');
+    if (!config.supabase.key) missing.push('SUPABASE_SECRET_KEY');
+  }
+  if (config.tokenMigrationSource === 'supabase') {
     if (!config.supabase.url) missing.push('SUPABASE_URL');
     if (!config.supabase.key) missing.push('SUPABASE_SECRET_KEY');
   }

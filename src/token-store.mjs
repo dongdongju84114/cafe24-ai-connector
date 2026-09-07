@@ -1,5 +1,7 @@
 import fs from 'node:fs/promises';
+import fsSync from 'node:fs';
 import path from 'node:path';
+import Database from 'better-sqlite3';
 import { decryptJson, encryptJson } from './crypto.mjs';
 import { parseCafe24TimestampMs } from './dates.mjs';
 
@@ -120,7 +122,7 @@ export class FileTokenStore {
       ...tokenPayload,
       ...extra,
       mall_id: tokenPayload.mall_id || mallId,
-      stored_at: records[mallId]?.stored_at || now,
+      stored_at: records[mallId]?.stored_at || tokenPayload.stored_at || now,
       updated_at: now
     };
     await this.writeAll(records);
@@ -128,9 +130,20 @@ export class FileTokenStore {
   }
 
   async listSummaries() {
-    const records = await this.readAll();
-    return Object.values(records).map(tokenSummary);
+    return (await this.listRecords()).map(tokenSummary);
   }
+
+  async listRecords() {
+    const records = await this.readAll();
+    return Object.values(records);
+  }
+
+  async healthCheck() {
+    await fs.mkdir(path.dirname(this.filePath), { recursive: true });
+    return { ok: true, provider: 'file' };
+  }
+
+  close() {}
 }
 
 export class SupabaseTokenStore {
@@ -189,7 +202,7 @@ export class SupabaseTokenStore {
       ...tokenPayload,
       ...extra,
       mall_id: tokenPayload.mall_id || mallId,
-      stored_at: existingRecord?.stored_at || now,
+      stored_at: existingRecord?.stored_at || tokenPayload.stored_at || now,
       updated_at: now
     };
 
@@ -209,24 +222,213 @@ export class SupabaseTokenStore {
   }
 
   async listSummaries() {
+    return (await this.listRecords()).map(tokenSummary);
+  }
+
+  async listRecords() {
     const rows = await this.request('?select=mall_id,envelope,updated_at');
     return (Array.isArray(rows) ? rows : [])
-      .map((row) => decryptJson(row.envelope, this.encryptionKey))
-      .map(tokenSummary);
+      .map((row) => decryptJson(row.envelope, this.encryptionKey));
+  }
+
+  async healthCheck() {
+    await this.request('?select=mall_id&limit=1');
+    return { ok: true, provider: 'supabase' };
+  }
+
+  close() {}
+}
+
+export class SqliteTokenStore {
+  constructor({ filePath, encryptionKey, databaseFactory = (targetPath) => new Database(targetPath) }) {
+    this.filePath = filePath;
+    this.encryptionKey = encryptionKey;
+
+    fsSync.mkdirSync(path.dirname(this.filePath), { recursive: true, mode: 0o700 });
+    this.database = databaseFactory(this.filePath);
+    this.database.pragma('journal_mode = WAL');
+    this.database.pragma('synchronous = FULL');
+    this.database.pragma('busy_timeout = 5000');
+    this.database.exec(`
+      CREATE TABLE IF NOT EXISTS cafe24_tokens (
+        mall_id TEXT PRIMARY KEY,
+        envelope TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    `);
+
+    try {
+      fsSync.chmodSync(this.filePath, 0o600);
+    } catch (error) {
+      if (error.code !== 'EPERM') throw error;
+    }
+
+    this.selectOne = this.database.prepare(
+      'SELECT mall_id, envelope, created_at, updated_at FROM cafe24_tokens WHERE mall_id = ?'
+    );
+    this.selectAll = this.database.prepare(
+      'SELECT mall_id, envelope, created_at, updated_at FROM cafe24_tokens ORDER BY mall_id'
+    );
+    this.upsert = this.database.prepare(`
+      INSERT INTO cafe24_tokens (mall_id, envelope, created_at, updated_at)
+      VALUES (@mallId, @envelope, @createdAt, @updatedAt)
+      ON CONFLICT(mall_id) DO UPDATE SET
+        envelope = excluded.envelope,
+        updated_at = excluded.updated_at
+    `);
+    this.upsertTransaction = this.database.transaction((row) => this.upsert.run(row));
+  }
+
+  decodeRow(row) {
+    if (!row) return null;
+    return decryptJson(JSON.parse(row.envelope), this.encryptionKey);
+  }
+
+  async get(mallId) {
+    return this.decodeRow(this.selectOne.get(mallId));
+  }
+
+  async set(mallId, tokenPayload, extra = {}) {
+    const existingRecord = await this.get(mallId);
+    const now = new Date().toISOString();
+    const record = {
+      ...existingRecord,
+      ...tokenPayload,
+      ...extra,
+      mall_id: tokenPayload.mall_id || mallId,
+      stored_at: existingRecord?.stored_at || tokenPayload.stored_at || now,
+      updated_at: now
+    };
+
+    this.upsertTransaction({
+      mallId,
+      envelope: JSON.stringify(encryptJson(record, this.encryptionKey)),
+      createdAt: existingRecord?.stored_at || tokenPayload.stored_at || now,
+      updatedAt: now
+    });
+    return record;
+  }
+
+  async listRecords() {
+    return this.selectAll.all().map((row) => this.decodeRow(row));
+  }
+
+  async listSummaries() {
+    return (await this.listRecords()).map(tokenSummary);
+  }
+
+  async healthCheck() {
+    const result = this.database.prepare('PRAGMA quick_check').get();
+    if (result?.quick_check !== 'ok') {
+      throw new Error('SQLite token store integrity check failed.');
+    }
+    return { ok: true, provider: 'sqlite' };
+  }
+
+  close() {
+    this.database.close();
+  }
+}
+
+export class MigratingTokenStore {
+  constructor({ primary, fallback, fallbackName }) {
+    this.primary = primary;
+    this.fallback = fallback;
+    this.fallbackName = fallbackName;
+  }
+
+  async migrateRecord(mallId, fallbackRecord) {
+    const existingRecord = await this.primary.get(mallId);
+    if (existingRecord) return existingRecord;
+
+    return this.primary.set(mallId, fallbackRecord, {
+      migrated_at: new Date().toISOString(),
+      migrated_from: this.fallbackName
+    });
+  }
+
+  async get(mallId) {
+    const primaryRecord = await this.primary.get(mallId);
+    if (primaryRecord) return primaryRecord;
+
+    const fallbackRecord = await this.fallback.get(mallId);
+    if (!fallbackRecord) return null;
+    return this.migrateRecord(mallId, fallbackRecord);
+  }
+
+  async set(mallId, tokenPayload, extra = {}) {
+    return this.primary.set(mallId, tokenPayload, extra);
+  }
+
+  async listRecords() {
+    const primaryRecords = await this.primary.listRecords();
+    const primaryMallIds = new Set(primaryRecords.map((record) => record.mall_id));
+    const fallbackRecords = await this.fallback.listRecords();
+
+    for (const record of fallbackRecords) {
+      if (!primaryMallIds.has(record.mall_id)) {
+        await this.migrateRecord(record.mall_id, record);
+      }
+    }
+
+    return this.primary.listRecords();
+  }
+
+  async listSummaries() {
+    return (await this.listRecords()).map(tokenSummary);
+  }
+
+  async healthCheck() {
+    return this.primary.healthCheck();
+  }
+
+  close() {
+    this.primary.close();
+    this.fallback.close();
   }
 }
 
 export class TokenStore extends FileTokenStore {}
 
 export function createTokenStore(config) {
+  let primary;
+
   if (config.tokenStoreProvider === 'supabase') {
-    return new SupabaseTokenStore({
+    primary = new SupabaseTokenStore({
       url: config.supabase.url,
       key: config.supabase.key,
       table: config.supabase.table,
       encryptionKey: config.encryptionKey
     });
+  } else if (config.tokenStoreProvider === 'sqlite') {
+    primary = new SqliteTokenStore({
+      filePath: config.sqlite.path,
+      encryptionKey: config.encryptionKey
+    });
+  } else if (config.tokenStoreProvider === 'file') {
+    primary = new FileTokenStore(config.tokenStorePath, config.encryptionKey || 'missing-dev-key');
+  } else {
+    throw new Error(`Unsupported CAFE24_TOKEN_STORE_PROVIDER: ${config.tokenStoreProvider}`);
   }
 
-  return new FileTokenStore(config.tokenStorePath, config.encryptionKey || 'missing-dev-key');
+  if (
+    config.tokenMigrationSource === 'supabase' &&
+    config.tokenStoreProvider !== 'supabase' &&
+    config.supabase.url &&
+    config.supabase.key
+  ) {
+    return new MigratingTokenStore({
+      primary,
+      fallback: new SupabaseTokenStore({
+        url: config.supabase.url,
+        key: config.supabase.key,
+        table: config.supabase.table,
+        encryptionKey: config.encryptionKey
+      }),
+      fallbackName: 'supabase'
+    });
+  }
+
+  return primary;
 }

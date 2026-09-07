@@ -90,6 +90,20 @@ test('createConfig uses Supabase token store when configured', () => {
   assert.equal(config.supabase.table, 'custom_tokens');
 });
 
+test('createConfig lets SQLite override Supabase and enables migration fallback', () => {
+  const config = createConfig({
+    CAFE24_TOKEN_STORE_PROVIDER: 'sqlite',
+    CAFE24_TOKEN_STORE_PATH: '/var/data/cafe24-token-store.sqlite3',
+    CAFE24_TOKEN_MIGRATION_SOURCE: 'supabase',
+    SUPABASE_URL: 'https://project.supabase.co',
+    SUPABASE_SECRET_KEY: 'secret-key'
+  });
+
+  assert.equal(config.tokenStoreProvider, 'sqlite');
+  assert.equal(config.sqlite.path, '/var/data/cafe24-token-store.sqlite3');
+  assert.equal(config.tokenMigrationSource, 'supabase');
+});
+
 test('callCafe24AdminGet blocks paths outside the allowlist before fetch', async () => {
   await assert.rejects(
     () =>
@@ -168,6 +182,57 @@ test('getFreshToken force refreshes even when stored access token is still valid
     assert.equal(token.access_token, 'force-refreshed-access');
     assert.equal(savedToken.refresh_token, 'rotated-refresh');
     assert.ok(savedToken.refreshed_at);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('getFreshToken coalesces concurrent refreshes for one mall', async () => {
+  const previousFetch = globalThis.fetch;
+  let currentToken = {
+    access_token: 'expired-access',
+    expires_at: '2000-01-01T00:00:00.000',
+    refresh_token: 'usable-refresh',
+    refresh_token_expires_at: '2099-01-15T00:00:00.000'
+  };
+  let refreshCalls = 0;
+  const tokenStore = {
+    async get() {
+      return currentToken;
+    },
+    async set(_mallId, tokenPayload, extra) {
+      currentToken = { ...currentToken, ...tokenPayload, ...extra };
+      return currentToken;
+    }
+  };
+
+  globalThis.fetch = async () => {
+    refreshCalls += 1;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    return new Response(
+      JSON.stringify({
+        access_token: 'coalesced-access',
+        refresh_token: 'rotated-refresh',
+        expires_at: '2099-01-01T02:00:00.000',
+        refresh_token_expires_at: '2099-01-15T02:00:00.000'
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } }
+    );
+  };
+
+  try {
+    const config = createConfig({
+      CAFE24_CLIENT_ID: 'client-id',
+      CAFE24_CLIENT_SECRET: 'client-secret'
+    });
+    const [first, second] = await Promise.all([
+      getFreshToken({ tokenStore, mallId: 'concurrent-mall', config }),
+      getFreshToken({ tokenStore, mallId: 'concurrent-mall', config })
+    ]);
+
+    assert.equal(first.access_token, 'coalesced-access');
+    assert.equal(second.access_token, 'coalesced-access');
+    assert.equal(refreshCalls, 1);
   } finally {
     globalThis.fetch = previousFetch;
   }

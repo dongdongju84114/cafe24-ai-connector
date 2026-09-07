@@ -7,7 +7,7 @@ Cafe24 Admin API OAuth 토큰을 메인 서버와 분리해서 보관하고, AI/
 - Cafe24 앱 실행 화면 제공: `/cafe24/app`
 - OAuth 시작/콜백 처리: `/cafe24/oauth/start`, `/cafe24/oauth/callback`
 - access token 만료 시 refresh token으로 재발급
-- token payload를 AES-256-GCM으로 암호화해 `data/tokens.enc.json`에 저장
+- token payload를 AES-256-GCM으로 암호화해 SQLite 또는 지정 저장소에 저장
 - 내부 API key가 있는 요청에만 Cafe24 Admin API 조회 제공
 - 외부로 token 값을 반환하거나 로그에 남기지 않음
 
@@ -109,7 +109,7 @@ https://cafe24-ai-connector.onrender.com/cafe24/oauth/callback
 
 Render는 web service에 `RENDER_EXTERNAL_URL`을 자동으로 넣어주므로, `PUBLIC_BASE_URL`을 따로 설정하지 않아도 이 URL을 기준으로 App URL/Redirect URI를 화면에 표시합니다. 나중에 custom domain을 붙이면 `PUBLIC_BASE_URL=https://your-domain`으로 직접 지정하세요.
 
-기본 `render.yaml`은 빠른 확인을 위해 Render free web service로 배포합니다. 이 상태에서도 서버와 `/healthz`, `/cafe24/app`은 정상 동작하지만, Render의 일반 filesystem은 redeploy/restart 때 사라질 수 있으므로 Cafe24 refresh token 저장에는 적합하지 않습니다.
+기본 `render.yaml`은 Render 유료 단일 인스턴스와 `/var/data` Persistent Disk를 사용합니다. Cafe24 token은 `/var/data/cafe24-token-store.sqlite3`에 암호화해 저장하므로 redeploy/restart 이후에도 보존됩니다.
 
 실제 Cafe24 OAuth 연결 전에 Render 환경변수에 아래 값을 추가하세요.
 
@@ -119,7 +119,7 @@ CAFE24_CLIENT_SECRET
 CAFE24_DEFAULT_MALL_ID
 ```
 
-운영 사용 전에는 token store를 Render Disk, Render Postgres, 또는 별도 secret storage로 옮기세요. Render Disk를 쓸 경우 paid instance가 필요할 수 있습니다.
+Persistent Disk는 단일 인스턴스만 지원하며 배포 중 짧은 중단이 발생할 수 있습니다. 이 커넥터는 단일 인스턴스 운영을 전제로 하고, 종료 신호를 받으면 SQLite 연결을 안전하게 닫습니다.
 
 ### 옵션 B. Cloudflare Tunnel
 
@@ -153,7 +153,7 @@ cp .env.example .env
 docker compose up --build
 ```
 
-파일 저장소를 운영에서 쓴다면 `data/` 볼륨을 반드시 보존하세요. Render 무료 환경에서는 Supabase token store를 권장합니다. refresh token은 재발급 때 회전되므로, token store가 사라지면 다시 OAuth 연결을 해야 합니다.
+파일 또는 SQLite 저장소를 운영에서 쓴다면 `data/` 볼륨을 반드시 보존하세요. refresh token은 재발급 때 회전될 수 있으므로, token store가 사라지면 다시 OAuth 연결을 해야 합니다.
 
 ## 환경변수
 
@@ -175,7 +175,9 @@ docker compose up --build
 | `INTERNAL_EXPOSE_CAFE24_ERROR_BODY` | Cafe24 오류 본문 노출 여부. 운영 기본값은 `false` |
 | `CAFE24_TOKEN_ENCRYPTION_KEY` | token store 암호화 키 |
 | `CAFE24_OAUTH_STATE_SECRET` | OAuth state 서명 키 |
-| `CAFE24_TOKEN_STORE_PROVIDER` | `file` 또는 `supabase`. Render 운영에서는 `supabase` 권장 |
+| `CAFE24_TOKEN_STORE_PROVIDER` | `file`, `sqlite`, `supabase`. Render Persistent Disk 운영값은 `sqlite` |
+| `CAFE24_TOKEN_STORE_PATH` | file 또는 SQLite 저장 경로. Render SQLite는 `/var/data/cafe24-token-store.sqlite3` |
+| `CAFE24_TOKEN_MIGRATION_SOURCE` | 기존 저장소에서 1회 이전할 source. 현재 지원값은 `supabase` |
 | `CAFE24_ALLOWED_ADMIN_PATH_PREFIXES` | generic proxy에서 허용할 Admin API path prefix |
 | `SUPABASE_URL` | Supabase Project URL |
 | `SUPABASE_SECRET_KEY` | Supabase backend secret key. 없으면 `SUPABASE_SERVICE_ROLE_KEY` 사용 |
@@ -205,6 +207,27 @@ SUPABASE_TOKEN_TABLE=cafe24_tokens
 `SUPABASE_SECRET_KEY` 또는 `SUPABASE_SERVICE_ROLE_KEY`는 서버 전용 키입니다. 브라우저, AI 프롬프트, 클라이언트 번들에 넣지 마세요.
 
 Supabase table에는 Cafe24 token 원문을 저장하지 않습니다. 서버가 `CAFE24_TOKEN_ENCRYPTION_KEY`로 token payload를 AES-GCM 암호화한 envelope만 저장합니다.
+
+## Render Persistent Disk + SQLite
+
+운영 Render 서비스는 아래 설정을 사용합니다.
+
+```text
+CAFE24_TOKEN_STORE_PROVIDER=sqlite
+CAFE24_TOKEN_STORE_PATH=/var/data/cafe24-token-store.sqlite3
+CAFE24_TOKEN_MIGRATION_SOURCE=supabase
+```
+
+배포 순서는 토큰 유실 방지를 위해 고정합니다.
+
+1. Render 서비스를 유료 단일 인스턴스로 전환하고 `/var/data`에 Persistent Disk를 연결합니다.
+2. SQLite 지원 코드를 배포합니다.
+3. `/internal/cafe24/status`를 한 번 호출해 기존 Supabase 암호화 레코드를 SQLite로 이전합니다.
+4. access token 발급과 Admin API proxy를 확인합니다.
+5. 서비스를 재시작한 뒤 같은 mall 연결 상태가 유지되는지 확인합니다.
+6. 검증이 끝나면 `CAFE24_TOKEN_MIGRATION_SOURCE`를 제거해 Supabase fallback을 비활성화합니다.
+
+마이그레이션 중에도 token 원문은 로그나 응답에 출력하지 않습니다. SQLite DB에는 기존과 동일한 AES-256-GCM envelope만 저장됩니다. 기존 Supabase 레코드는 롤백 확인이 끝날 때까지 읽기 전용 백업으로 유지합니다.
 
 ## URL 역할
 
@@ -289,7 +312,7 @@ mall.read_analytics
 
 ## 운영 메모
 
-- 이 스캐폴드는 단일 서버/단일 파일 저장소 기준입니다. 다중 인스턴스로 키우면 Postgres 또는 KMS 기반 secret storage로 옮기세요.
+- Render Persistent Disk + SQLite 구성은 단일 인스턴스 기준입니다. 다중 인스턴스로 확장할 때는 Postgres 또는 KMS 기반 secret storage로 옮기세요.
 - Cafe24 refresh token은 재발급 시 회전될 수 있으므로 token store 쓰기 실패를 운영 알림으로 잡는 편이 좋습니다.
 - AI에는 가능하면 Cafe24 token을 넘기지 말고 이 서버의 내부 API 결과만 전달하세요. token 발급 endpoint는 서버 간 호출에만 사용하세요.
 - Generic proxy는 GET-only지만 개인정보가 포함된 API를 호출할 수 있으므로 내부 네트워크, 방화벽, API key로 한 번 더 감싸세요.
@@ -300,5 +323,7 @@ mall.read_analytics
 - Cafe24 OAuth authorization code: https://developers.cafe24.com/en/app/front/app/develop/oauth/oauthcode
 - Cafe24 access token: https://developers.cafe24.com/app/front/app/develop/oauth/token
 - Cafe24 Admin API call: https://developers.cafe24.com/app/front/app/develop/api/adminapi
-- Cafe24 Orders API: https://developers.cafe24.com/docs/api/admin/?version=2024-12-01
+- Cafe24 Orders API: https://developers.cafe24.com/docs/api/admin/?version=2026-03-01
+- Render Persistent Disks: https://render.com/docs/disks
+- Render Blueprints: https://render.com/docs/blueprint-spec
 - Cloudflare Tunnel routing: https://developers.cloudflare.com/tunnel/routing/
