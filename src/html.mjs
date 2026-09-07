@@ -115,11 +115,14 @@ function layout(title, body) {
 
 export function appPage({ config, missingSetup, connectedMalls }) {
   const defaultMallId = config.cafe24.defaultMallId || '';
+  const isLunaTokenSource = config.tokenSource === 'luna';
   const connectedList = connectedMalls.length
     ? `<ul class="list">${connectedMalls
         .map((mall) => renderMallStatus(mall))
         .join('')}</ul>`
-    : '<p class="muted">아직 연결된 쇼핑몰이 없습니다.</p>';
+    : `<p class="muted">${isLunaTokenSource
+      ? '내부 API가 처음 호출되면 LUNA에서 access token을 가져옵니다.'
+      : '아직 연결된 쇼핑몰이 없습니다.'}</p>`;
 
   const setupWarning = missingSetup.length
     ? `<p class="warning">서버 설정이 아직 비어 있습니다: ${escapeHtml(
@@ -127,26 +130,34 @@ export function appPage({ config, missingSetup, connectedMalls }) {
       )}</p>`
     : '';
 
+  const connectionControls = isLunaTokenSource
+    ? `<h2>토큰 관리</h2>
+      <p>OAuth와 refresh token은 LUNA가 관리합니다. 이 서버는 access token만 짧게 메모리에 보관합니다.</p>
+      ${config.luna.manageUrl
+        ? `<p><a class="button" href="${escapeHtml(config.luna.manageUrl)}">LUNA Cafe24 관리 열기</a></p>`
+        : ''}`
+    : `<h2>카페24 연결</h2>
+      <form action="/cafe24/oauth/start" method="get">
+        <p>
+          <label for="mall_id">Mall ID</label><br>
+          <input id="mall_id" name="mall_id" value="${escapeHtml(defaultMallId)}" placeholder="예: opengallery12" required>
+        </p>
+        <button type="submit">카페24 권한 연결하기</button>
+      </form>
+      <h2>등록할 URL</h2>
+      <ul class="list">
+        <li>App URL: <code>${escapeHtml(config.appUrl || '(PUBLIC_BASE_URL 필요)')}</code></li>
+        <li>Redirect URI: <code>${escapeHtml(config.redirectUri || '(PUBLIC_BASE_URL 필요)')}</code></li>
+      </ul>
+      <h2>요청 Scope</h2>
+      <p><code>${escapeHtml(config.cafe24.scopes.join(' '))}</code></p>`;
+
   return layout(
     'Cafe24 AI Connector',
     `<h1>Cafe24 AI Connector</h1>
-    <p class="muted">Cafe24 Admin API 토큰을 보관하고 내부 AI/리포트 서버에 read-only 조회 API를 제공하는 전용 서버입니다.</p>
+    <p class="muted">Cafe24 Admin API를 중앙에서 호출하고 내부 AI/리포트 도구에 읽기 전용 프록시를 제공합니다.</p>
     ${setupWarning}
-    <h2>카페24 연결</h2>
-    <form action="/cafe24/oauth/start" method="get">
-      <p>
-        <label for="mall_id">Mall ID</label><br>
-        <input id="mall_id" name="mall_id" value="${escapeHtml(defaultMallId)}" placeholder="예: opengallery12" required>
-      </p>
-      <button type="submit">카페24 권한 연결하기</button>
-    </form>
-    <h2>등록할 URL</h2>
-    <ul class="list">
-      <li>App URL: <code>${escapeHtml(config.appUrl || '(PUBLIC_BASE_URL 필요)')}</code></li>
-      <li>Redirect URI: <code>${escapeHtml(config.redirectUri || '(PUBLIC_BASE_URL 필요)')}</code></li>
-    </ul>
-    <h2>요청 Scope</h2>
-    <p><code>${escapeHtml(config.cafe24.scopes.join(' '))}</code></p>
+    ${connectionControls}
     <h2>연결 상태</h2>
     ${connectedList}`
   );
@@ -154,6 +165,12 @@ export function appPage({ config, missingSetup, connectedMalls }) {
 
 function renderMallStatus(mall) {
   const mallId = mall.mall_id || '';
+  if (mall.token_source === 'luna') {
+    return `<li><strong>${escapeHtml(mallId)}</strong> · LUNA access token ${escapeHtml(
+      mall.access_token_status === 'cached' ? '메모리 캐시됨' : '캐시 만료'
+    )}</li>`;
+  }
+
   const reconnectLink = `/cafe24/oauth/start?mall_id=${encodeURIComponent(mallId)}`;
   const statusClass = mall.reconnect_required
     ? 'danger'

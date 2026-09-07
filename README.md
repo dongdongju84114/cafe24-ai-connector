@@ -1,19 +1,43 @@
 # Cafe24 AI Connector
 
-Cafe24 Admin API OAuth 토큰을 메인 서버와 분리해서 보관하고, AI/리포트 서버에는 내부 read-only API만 제공하는 전용 커넥터 서버입니다.
+Render에서 Cafe24 Admin API 호출을 중앙 처리하고, AI/리포트 도구에는 내부 read-only API를 제공하는 커넥터 서버입니다. 운영 기본 구성에서는 OAuth와 refresh token을 기존 LUNA가 관리하며, 이 서버는 LUNA에서 받은 access token만 짧게 메모리에 보관합니다.
 
 ## 역할
 
-- Cafe24 앱 실행 화면 제공: `/cafe24/app`
-- OAuth 시작/콜백 처리: `/cafe24/oauth/start`, `/cafe24/oauth/callback`
-- access token 만료 시 refresh token으로 재발급
-- token payload를 AES-256-GCM으로 암호화해 SQLite 또는 지정 저장소에 저장
+- Render에서 Cafe24 Admin API read-only proxy 제공
+- LUNA 내부 endpoint에서 access token만 요청
+- Cafe24가 `401`을 반환하면 LUNA 내부 갱신을 요청한 뒤 원래 API를 1회 재시도
+- access token을 기본 10분 동안 프로세스 메모리에만 캐시
+- OAuth와 refresh token은 LUNA에서만 관리
 - 내부 API key가 있는 요청에만 Cafe24 Admin API 조회 제공
-- 외부로 token 값을 반환하거나 로그에 남기지 않음
+- token과 내부 API key를 로그에 남기지 않음
 
-## Cafe24 앱 설정값
+## 운영 구성
 
-아래 URL은 예시입니다. 실제 DNS/터널/서버가 연결된 HTTPS 도메인으로 바꿔서 등록해야 합니다.
+LUNA와 Render에는 서로 같은 토큰 브리지용 secret을 각기 아래 이름으로 설정합니다. 실제 값은 저장소에 커밋하지 않습니다.
+
+```text
+LUNA
+CAFE24_CONNECTOR_INTERNAL_API_KEY
+
+Render
+LUNA_CAFE24_TOKEN_API_KEY
+```
+
+Render의 주요 설정은 다음과 같습니다.
+
+```text
+CAFE24_TOKEN_SOURCE=luna
+CAFE24_DEFAULT_MALL_ID=opengallery12
+LUNA_CAFE24_TOKEN_URL=https://www.opengallery.co.kr/api/cafe24/connector-token/
+LUNA_CAFE24_MANAGE_URL=https://www.opengallery.co.kr/luna/cafe24/
+```
+
+LUNA endpoint는 인증된 Render 요청에 access token만 반환합니다. refresh token은 응답하지 않으며, Render의 파일·SQLite·Supabase에도 저장하지 않습니다.
+
+## Legacy 자체 OAuth 모드
+
+`CAFE24_TOKEN_SOURCE=store`로 설정하면 기존 자체 OAuth/token store 모드도 사용할 수 있습니다. 아래 URL은 이 legacy 모드에서만 Cafe24 Developer Admin에 등록합니다.
 
 개발 도메인을 `https://cafe24-ai-dev.opengallery.co.kr`로 실제 연결했다면 Cafe24 Developer Admin에는 아래처럼 등록합니다.
 
@@ -39,7 +63,7 @@ cp .env.example .env
 node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
 ```
 
-`.env`를 채운 뒤 실행합니다.
+`.env`에서 LUNA token source와 내부 API key를 채운 뒤 실행합니다.
 
 ```bash
 npm start
@@ -51,7 +75,7 @@ npm start
 http://127.0.0.1:4173/cafe24/app
 ```
 
-Cafe24 OAuth는 HTTPS 실제 도메인이 필요하므로 로컬 개발 중에는 Cloudflare Tunnel 또는 ngrok 같은 터널로 public hostname을 붙입니다.
+LUNA token source 모드에서는 로컬 connector가 OAuth를 직접 처리하지 않으므로 터널이 필요하지 않습니다. 아래 터널 설명은 legacy 자체 OAuth 모드에만 해당합니다.
 
 ```text
 public hostname: https://cafe24-ai-dev.opengallery.co.kr
@@ -97,7 +121,7 @@ Render에서 생성합니다.
 https://cafe24-ai-connector.onrender.com
 ```
 
-Cafe24 Developer Admin에는 이렇게 등록합니다.
+Legacy 자체 OAuth 모드라면 Cafe24 Developer Admin에는 이렇게 등록합니다.
 
 ```text
 App URL
@@ -109,17 +133,12 @@ https://cafe24-ai-connector.onrender.com/cafe24/oauth/callback
 
 Render는 web service에 `RENDER_EXTERNAL_URL`을 자동으로 넣어주므로, `PUBLIC_BASE_URL`을 따로 설정하지 않아도 이 URL을 기준으로 App URL/Redirect URI를 화면에 표시합니다. 나중에 custom domain을 붙이면 `PUBLIC_BASE_URL=https://your-domain`으로 직접 지정하세요.
 
-기본 `render.yaml`은 Render 무료 web service를 유지합니다. 무료 인스턴스는 Persistent Disk를 지원하지 않으므로 운영 token은 기존 Supabase 저장소에 보관해야 합니다.
-
-실제 Cafe24 OAuth 연결 전에 Render 환경변수에 아래 값을 추가하세요.
+기본 `render.yaml`은 Render 무료 web service와 LUNA token source를 사용합니다. Render 로컬 디스크나 Supabase에 token을 보존할 필요가 없습니다. 배포 전에 Render 환경변수에 토큰 브리지 secret을 추가하고, 같은 값을 LUNA에 설정하세요.
 
 ```text
-CAFE24_CLIENT_ID
-CAFE24_CLIENT_SECRET
-CAFE24_DEFAULT_MALL_ID
+Render: LUNA_CAFE24_TOKEN_API_KEY
+LUNA: CAFE24_CONNECTOR_INTERNAL_API_KEY
 ```
-
-유료 전환을 결정한 경우에만 아래의 선택적 Persistent Disk 절차를 적용합니다. 무료 플랜에서는 SQLite 파일을 token의 운영 저장소로 사용하지 않습니다.
 
 ### 옵션 B. Cloudflare Tunnel
 
@@ -167,6 +186,12 @@ docker compose up --build
 | `CAFE24_DEFAULT_MALL_ID` | 기본 mall ID |
 | `CAFE24_API_VERSION` | `X-Cafe24-Api-Version` 헤더 |
 | `CAFE24_SCOPES` | OAuth 요청 scope 목록 |
+| `CAFE24_TOKEN_SOURCE` | 운영 기본값 `luna`. Legacy 자체 저장 모드는 `store` |
+| `LUNA_CAFE24_TOKEN_URL` | access token만 반환하는 LUNA 내부 endpoint |
+| `LUNA_CAFE24_TOKEN_API_KEY` | LUNA endpoint 인증용 Bearer secret |
+| `LUNA_CAFE24_MANAGE_URL` | OAuth 재연결이 필요할 때 안내할 LUNA Cafe24 관리 URL |
+| `LUNA_CAFE24_TOKEN_CACHE_TTL_MS` | Render 프로세스 메모리의 access token 캐시 시간. 기본 600000ms(10분) |
+| `LUNA_CAFE24_TOKEN_TIMEOUT_MS` | LUNA token 요청 timeout. 기본 15000ms |
 | `INTERNAL_API_KEY` | 내부 API 호출용 Bearer secret |
 | `INTERNAL_ALLOWED_ORIGINS` | 브라우저에서 내부 API를 호출할 때 허용할 Origin. 서버 간 호출만 쓰면 비워둡니다. |
 | `INTERNAL_ALLOWED_IPS` | 내부 API 호출을 허용할 IP/CIDR allowlist. Render 환경에서는 보조 방어로만 사용하세요. |
@@ -184,9 +209,9 @@ docker compose up --build
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase legacy service role key |
 | `SUPABASE_TOKEN_TABLE` | Cafe24 token 저장 table. 기본값 `cafe24_tokens` |
 
-## Supabase token store
+## Legacy Supabase token store
 
-Render 무료 인스턴스의 로컬 파일 저장소는 재배포/재시작 때 사라질 수 있습니다. 운영 테스트 단계부터는 Supabase Postgres에 암호화된 token payload를 저장하는 방식을 권장합니다.
+이 절은 `CAFE24_TOKEN_SOURCE=store`를 계속 사용하는 기존 배포를 위한 호환 문서입니다. LUNA token source에서는 Supabase token store를 사용하지 않습니다.
 
 1. Supabase에서 무료 프로젝트를 생성합니다.
 2. SQL Editor에서 아래 파일 내용을 실행합니다.
@@ -208,9 +233,9 @@ SUPABASE_TOKEN_TABLE=cafe24_tokens
 
 Supabase table에는 Cafe24 token 원문을 저장하지 않습니다. 서버가 `CAFE24_TOKEN_ENCRYPTION_KEY`로 token payload를 AES-GCM 암호화한 envelope만 저장합니다.
 
-## 선택 사항: Render Persistent Disk + SQLite
+## Legacy 선택 사항: Render Persistent Disk + SQLite
 
-이 구성은 유료 Render 인스턴스와 Persistent Disk를 사용하기로 결정했을 때만 적용합니다. 기본 `render.yaml`에는 포함하지 않습니다.
+이 구성은 legacy 자체 OAuth 모드에서 유료 Render 인스턴스와 Persistent Disk를 사용하기로 결정했을 때만 적용합니다. 기본 `render.yaml`에는 포함하지 않습니다.
 
 ```text
 CAFE24_TOKEN_STORE_PROVIDER=sqlite

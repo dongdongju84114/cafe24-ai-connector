@@ -1,9 +1,15 @@
 import http from 'node:http';
 import { URL } from 'node:url';
-import { buildAuthorizationUrl, callCafe24AdminGet, exchangeAuthorizationCode, getFreshToken } from './cafe24.mjs';
+import { callCafe24AdminWithToken } from './admin-client.mjs';
+import {
+  buildAuthorizationUrl,
+  exchangeAuthorizationCode,
+  getFreshToken
+} from './cafe24.mjs';
 import { getMissingSetup, getRuntimeConfig } from './config.mjs';
 import { constantTimeBearerMatches, verifyState } from './crypto.mjs';
 import { appPage, callbackSuccessPage, errorPage } from './html.mjs';
+import { LunaTokenProvider } from './luna-token-provider.mjs';
 import {
   createRateLimiter,
   getClientIp,
@@ -15,7 +21,10 @@ import {
 import { createTokenStore } from './token-store.mjs';
 
 const config = getRuntimeConfig();
-const tokenStore = createTokenStore(config);
+const tokenStore = config.tokenSource === 'luna' ? null : createTokenStore(config);
+const lunaTokenProvider = config.tokenSource === 'luna'
+  ? new LunaTokenProvider(config.luna)
+  : null;
 const internalRateLimiter = createRateLimiter({
   maxRequests: config.internal.rateLimitMax,
   windowMs: config.internal.rateLimitWindowMs
@@ -142,17 +151,49 @@ function getMallId(url) {
   return url.searchParams.get('mall_id') || config.cafe24.defaultMallId;
 }
 
-function canReadTokenStore() {
-  if (!config.encryptionKey) return false;
-  if (config.tokenStoreProvider === 'sqlite') return Boolean(config.sqlite.path);
-  if (config.tokenStoreProvider === 'supabase') {
-    return Boolean(config.supabase.url && config.supabase.key);
+function tokenSetupFields() {
+  if (lunaTokenProvider) {
+    return ['LUNA_CAFE24_TOKEN_URL', 'LUNA_CAFE24_TOKEN_API_KEY'];
   }
-  return config.tokenStoreProvider === 'file';
+  return [
+    'CAFE24_CLIENT_ID',
+    'CAFE24_CLIENT_SECRET',
+    'CAFE24_TOKEN_ENCRYPTION_KEY'
+  ];
+}
+
+async function getConnectorToken(mallId, options = {}) {
+  if (lunaTokenProvider) {
+    return lunaTokenProvider.get(mallId, options);
+  }
+  return getFreshToken({
+    tokenStore,
+    mallId,
+    config,
+    forceRefresh: options.forceRefresh === true
+  });
+}
+
+async function tokenProviderHealthCheck() {
+  if (lunaTokenProvider) return lunaTokenProvider.healthCheck();
+  return tokenStore.healthCheck();
+}
+
+async function tokenProviderSummaries() {
+  if (lunaTokenProvider) return lunaTokenProvider.listSummaries();
+  if (!config.encryptionKey) return [];
+  if (config.tokenStoreProvider === 'sqlite' && !config.sqlite.path) return [];
+  if (
+    config.tokenStoreProvider === 'supabase' &&
+    (!config.supabase.url || !config.supabase.key)
+  ) {
+    return [];
+  }
+  return tokenStore.listSummaries();
 }
 
 async function handleApp(_request, response) {
-  const summaries = canReadTokenStore() ? await tokenStore.listSummaries() : [];
+  const summaries = await tokenProviderSummaries();
   sendHtml(
     response,
     200,
@@ -165,6 +206,22 @@ async function handleApp(_request, response) {
 }
 
 function handleOauthStart(url, response) {
+  if (lunaTokenProvider) {
+    if (config.luna.manageUrl) {
+      redirect(response, config.luna.manageUrl);
+      return;
+    }
+    sendHtml(
+      response,
+      409,
+      errorPage({
+        title: 'LUNA 연결 필요',
+        message: 'Cafe24 OAuth는 LUNA에서 관리합니다.'
+      })
+    );
+    return;
+  }
+
   if (
     !requireConfigured(response, [
       'PUBLIC_BASE_URL',
@@ -198,6 +255,18 @@ function handleOauthStart(url, response) {
 }
 
 async function handleOauthCallback(url, response) {
+  if (lunaTokenProvider) {
+    sendHtml(
+      response,
+      409,
+      errorPage({
+        title: 'LUNA 연결 필요',
+        message: 'Cafe24 OAuth callback은 LUNA에서 처리합니다.'
+      })
+    );
+    return;
+  }
+
   if (
     !requireConfigured(response, [
       'PUBLIC_BASE_URL',
@@ -261,20 +330,17 @@ async function handleInternalStatus(request, response) {
     public_base_url: config.publicBaseUrl,
     app_url: config.appUrl,
     redirect_uri: config.redirectUri,
-    token_store: await tokenStore.healthCheck(),
+    token_source: config.tokenSource,
+    token_provider: await tokenProviderHealthCheck(),
     missing_setup: getMissingSetup(config),
-    connected_malls: await tokenStore.listSummaries()
+    connected_malls: await tokenProviderSummaries()
   });
 }
 
 async function handleAccessToken(url, request, response) {
   if (!requireInternalAccess(request, response)) return;
   if (
-    !requireConfiguredJson(response, [
-      'CAFE24_CLIENT_ID',
-      'CAFE24_CLIENT_SECRET',
-      'CAFE24_TOKEN_ENCRYPTION_KEY'
-    ])
+    !requireConfiguredJson(response, tokenSetupFields())
   ) {
     return;
   }
@@ -288,10 +354,7 @@ async function handleAccessToken(url, request, response) {
     return;
   }
 
-  const token = await getFreshToken({
-    tokenStore,
-    mallId,
-    config,
+  const token = await getConnectorToken(mallId, {
     forceRefresh: url.searchParams.get('force_refresh') === '1'
       || url.searchParams.get('refresh') === '1',
   });
@@ -301,6 +364,20 @@ async function handleAccessToken(url, request, response) {
     access_token: token.access_token,
     expires_at: token.expires_at || null,
     scopes: Array.isArray(token.scopes) ? token.scopes : []
+  });
+}
+
+async function callAdminWithToken({ mallId, resourcePath, query }) {
+  return callCafe24AdminWithToken({
+    mallId,
+    resourcePath,
+    query,
+    apiVersion: config.cafe24.apiVersion,
+    allowedPrefixes: config.cafe24.allowedAdminPathPrefixes,
+    getToken: getConnectorToken,
+    invalidateToken: (requestedMallId, rejectedAccessToken) => {
+      lunaTokenProvider?.invalidate(requestedMallId, rejectedAccessToken);
+    }
   });
 }
 
@@ -319,14 +396,10 @@ async function handleOrders(url, request, response) {
     if (value) query.set(key, value);
   }
 
-  const token = await getFreshToken({ tokenStore, mallId, config });
-  const payload = await callCafe24AdminGet({
+  const payload = await callAdminWithToken({
     mallId,
     resourcePath: '/api/v2/admin/orders',
-    query,
-    accessToken: token.access_token,
-    apiVersion: config.cafe24.apiVersion,
-    allowedPrefixes: config.cafe24.allowedAdminPathPrefixes
+    query
   });
 
   sendJson(response, 200, {
@@ -354,14 +427,10 @@ async function handleAdminProxy(url, request, response) {
     return;
   }
 
-  const token = await getFreshToken({ tokenStore, mallId, config });
-  const payload = await callCafe24AdminGet({
+  const payload = await callAdminWithToken({
     mallId,
     resourcePath,
-    query: url.searchParams,
-    accessToken: token.access_token,
-    apiVersion: config.cafe24.apiVersion,
-    allowedPrefixes: config.cafe24.allowedAdminPathPrefixes
+    query: url.searchParams
   });
 
   sendJson(response, 200, {
@@ -387,7 +456,8 @@ async function route(request, response) {
     sendJson(response, 200, {
       ok: true,
       service: 'cafe24-ai-connector',
-      token_store: await tokenStore.healthCheck()
+      token_source: config.tokenSource,
+      token_provider: await tokenProviderHealthCheck()
     });
     return;
   }
@@ -454,10 +524,13 @@ const server = http.createServer(async (request, response) => {
       error: error.code || (status >= 500 ? 'internal_error' : 'request_failed'),
       message: error.message,
       cafe24_status: error.details?.cafe24_status || error.status || undefined,
-      reconnect_required: error.code === 'reconnect_required' || undefined,
-      reconnect_url: error.code === 'reconnect_required'
-        ? reconnectUrl(error.details?.mall_id)
-        : undefined
+      reconnect_required: error.details?.reconnect_required === true ||
+        error.code === 'reconnect_required' || undefined,
+      reconnect_url: error.details?.reconnect_url || (
+        error.code === 'reconnect_required'
+          ? reconnectUrl(error.details?.mall_id)
+          : undefined
+      )
     };
 
     if (error.details?.reason) {
@@ -483,7 +556,7 @@ const server = http.createServer(async (request, response) => {
 
 server.listen(config.port, config.host, () => {
   console.log(
-    `Cafe24 AI connector listening on http://${config.host}:${config.port} with ${config.tokenStoreProvider} token store`
+    `Cafe24 AI connector listening on http://${config.host}:${config.port} with ${config.tokenSource} token source`
   );
 });
 
@@ -496,14 +569,16 @@ function shutdown(signal) {
 
   const forceCloseTimer = setTimeout(() => {
     server.closeAllConnections?.();
-    tokenStore.close();
+    tokenStore?.close();
+    lunaTokenProvider?.close();
     process.exit(1);
   }, 10_000);
   forceCloseTimer.unref();
 
   server.close(() => {
     clearTimeout(forceCloseTimer);
-    tokenStore.close();
+    tokenStore?.close();
+    lunaTokenProvider?.close();
     process.exit(0);
   });
 }
@@ -512,6 +587,9 @@ process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
 function reconnectUrl(mallId) {
+  if (lunaTokenProvider && config.luna.manageUrl) {
+    return config.luna.manageUrl;
+  }
   const query = mallId ? `?mall_id=${encodeURIComponent(mallId)}` : '';
   if (config.publicBaseUrl) {
     return `${config.publicBaseUrl}/cafe24/oauth/start${query}`;

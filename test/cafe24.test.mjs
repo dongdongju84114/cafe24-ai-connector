@@ -8,7 +8,7 @@ import {
   getFreshToken,
   isAccessTokenExpiring
 } from '../src/cafe24.mjs';
-import { createConfig } from '../src/config.mjs';
+import { createConfig, getMissingSetup } from '../src/config.mjs';
 import { parseCafe24TimestampMs } from '../src/dates.mjs';
 
 test('buildAuthorizationUrl creates Cafe24 authorize URLs', () => {
@@ -102,6 +102,39 @@ test('createConfig lets SQLite override Supabase and enables migration fallback'
   assert.equal(config.tokenStoreProvider, 'sqlite');
   assert.equal(config.sqlite.path, '/var/data/cafe24-token-store.sqlite3');
   assert.equal(config.tokenMigrationSource, 'supabase');
+});
+
+test('createConfig supports a LUNA access-token-only source', () => {
+  const config = createConfig({
+    INTERNAL_API_KEY: 'connector-internal-key',
+    CAFE24_TOKEN_SOURCE: 'luna',
+    LUNA_CAFE24_TOKEN_URL: 'https://www.opengallery.co.kr/api/cafe24/connector-token/',
+    LUNA_CAFE24_TOKEN_API_KEY: 'luna-token-key',
+    LUNA_CAFE24_MANAGE_URL: 'https://www.opengallery.co.kr/luna/cafe24/'
+  });
+
+  assert.equal(config.tokenSource, 'luna');
+  assert.equal(
+    config.luna.tokenUrl,
+    'https://www.opengallery.co.kr/api/cafe24/connector-token/'
+  );
+  assert.equal(config.luna.apiKey, 'luna-token-key');
+  assert.equal(config.luna.cacheTtlMs, 10 * 60 * 1000);
+  assert.deepEqual(getMissingSetup(config), []);
+});
+
+test('LUNA token mode does not require OAuth or token-store credentials', () => {
+  const config = createConfig({
+    INTERNAL_API_KEY: 'connector-internal-key',
+    CAFE24_TOKEN_SOURCE: 'luna',
+    LUNA_CAFE24_TOKEN_URL: 'https://www.opengallery.co.kr/api/cafe24/connector-token/',
+    LUNA_CAFE24_TOKEN_API_KEY: 'luna-token-key'
+  });
+
+  const missing = getMissingSetup(config);
+  assert.equal(missing.includes('CAFE24_CLIENT_SECRET'), false);
+  assert.equal(missing.includes('CAFE24_TOKEN_ENCRYPTION_KEY'), false);
+  assert.equal(missing.includes('SUPABASE_SECRET_KEY'), false);
 });
 
 test('callCafe24AdminGet blocks paths outside the allowlist before fetch', async () => {

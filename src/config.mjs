@@ -50,6 +50,7 @@ function parsePositiveInt(value, defaultValue) {
 export function createConfig(env = process.env) {
   const publicBaseUrl = (env.PUBLIC_BASE_URL || env.RENDER_EXTERNAL_URL || '').replace(/\/+$/, '');
   const supabaseKey = env.SUPABASE_SECRET_KEY || env.SUPABASE_SERVICE_ROLE_KEY || '';
+  const tokenSource = env.CAFE24_TOKEN_SOURCE || 'store';
   const tokenStoreProvider =
     env.CAFE24_TOKEN_STORE_PROVIDER || (env.SUPABASE_URL && supabaseKey ? 'supabase' : 'file');
   const tokenStorePath = env.CAFE24_TOKEN_STORE_PATH || './data/tokens.enc.json';
@@ -85,6 +86,14 @@ export function createConfig(env = process.env) {
       rateLimitWindowMs: parsePositiveInt(env.INTERNAL_RATE_LIMIT_WINDOW_MS, 60 * 1000),
       exposeCafe24ErrorBody: env.INTERNAL_EXPOSE_CAFE24_ERROR_BODY === 'true'
     },
+    tokenSource,
+    luna: {
+      tokenUrl: (env.LUNA_CAFE24_TOKEN_URL || '').trim(),
+      apiKey: env.LUNA_CAFE24_TOKEN_API_KEY || env.INTERNAL_API_KEY || '',
+      manageUrl: (env.LUNA_CAFE24_MANAGE_URL || '').trim(),
+      cacheTtlMs: parsePositiveInt(env.LUNA_CAFE24_TOKEN_CACHE_TTL_MS, 10 * 60 * 1000),
+      requestTimeoutMs: parsePositiveInt(env.LUNA_CAFE24_TOKEN_TIMEOUT_MS, 15 * 1000)
+    },
     tokenStoreProvider,
     tokenMigrationSource: env.CAFE24_TOKEN_MIGRATION_SOURCE || '',
     sqlite: {
@@ -104,19 +113,25 @@ export function createConfig(env = process.env) {
 export function getMissingSetup(config) {
   const missing = [];
 
-  if (!config.publicBaseUrl) missing.push('PUBLIC_BASE_URL');
-  if (!config.cafe24.clientId) missing.push('CAFE24_CLIENT_ID');
-  if (!config.cafe24.clientSecret) missing.push('CAFE24_CLIENT_SECRET');
-  if (!config.encryptionKey) missing.push('CAFE24_TOKEN_ENCRYPTION_KEY');
-  if (!config.oauthStateSecret) missing.push('CAFE24_OAUTH_STATE_SECRET');
   if (!config.internal.apiKey) missing.push('INTERNAL_API_KEY');
-  if (config.tokenStoreProvider === 'supabase') {
-    if (!config.supabase.url) missing.push('SUPABASE_URL');
-    if (!config.supabase.key) missing.push('SUPABASE_SECRET_KEY');
-  }
-  if (config.tokenMigrationSource === 'supabase') {
-    if (!config.supabase.url) missing.push('SUPABASE_URL');
-    if (!config.supabase.key) missing.push('SUPABASE_SECRET_KEY');
+
+  if (config.tokenSource === 'luna') {
+    if (!config.luna.tokenUrl) missing.push('LUNA_CAFE24_TOKEN_URL');
+    if (!config.luna.apiKey) missing.push('LUNA_CAFE24_TOKEN_API_KEY');
+  } else {
+    if (!config.publicBaseUrl) missing.push('PUBLIC_BASE_URL');
+    if (!config.cafe24.clientId) missing.push('CAFE24_CLIENT_ID');
+    if (!config.cafe24.clientSecret) missing.push('CAFE24_CLIENT_SECRET');
+    if (!config.encryptionKey) missing.push('CAFE24_TOKEN_ENCRYPTION_KEY');
+    if (!config.oauthStateSecret) missing.push('CAFE24_OAUTH_STATE_SECRET');
+    if (config.tokenStoreProvider === 'supabase') {
+      if (!config.supabase.url) missing.push('SUPABASE_URL');
+      if (!config.supabase.key) missing.push('SUPABASE_SECRET_KEY');
+    }
+    if (config.tokenMigrationSource === 'supabase') {
+      if (!config.supabase.url) missing.push('SUPABASE_URL');
+      if (!config.supabase.key) missing.push('SUPABASE_SECRET_KEY');
+    }
   }
 
   return missing;
